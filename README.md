@@ -9,6 +9,10 @@
 - 轻量级社区频道
 - WebRTC / Gin / WebSocket 实时系统练手项目
 
+## 使用截图
+<img width="1280" height="680" alt="a956294c2b584c2b0df1248c22b35649" src="https://github.com/user-attachments/assets/3e9051fe-62ee-4fb0-9175-91465b61830b" />
+
+
 ## 在线能力
 
 - 邮箱验证码注册与登录
