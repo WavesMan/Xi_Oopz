@@ -9,6 +9,9 @@ import (
 
 type Config struct {
 	Port          string
+	HTTPSEnabled  bool
+	TLSCertFile   string
+	TLSKeyFile    string
 	MySQLDSN      string
 	RedisAddr     string
 	RedisPassword string
@@ -64,6 +67,9 @@ func LoadDotEnv(path string) error {
 func Load() Config {
 	return Config{
 		Port:          env("PORT", "8080"),
+		HTTPSEnabled:  envBool("HTTPS_ENABLED", false),
+		TLSCertFile:   os.Getenv("TLS_CERT_FILE"),
+		TLSKeyFile:    os.Getenv("TLS_KEY_FILE"),
 		MySQLDSN:      env("MYSQL_DSN", "root:password@tcp(127.0.0.1:3306)/oopz?parseTime=true&multiStatements=true"),
 		RedisAddr:     env("REDIS_ADDR", "127.0.0.1:6379"),
 		RedisPassword: os.Getenv("REDIS_PASSWORD"),

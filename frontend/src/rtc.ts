@@ -7,8 +7,10 @@ type PeerWrapper = {
   polite: boolean;
   makingOffer: boolean;
   ignoreOffer: boolean;
-  initiated: boolean;
-  queuedNegotiation: boolean;
+  isSettingRemoteAnswerPending: boolean;
+  initialOfferOwner: boolean;
+  hasBoundLocalTracks: boolean;
+  pendingIceCandidates: RTCIceCandidateInit[];
   audioTransceiver: RTCRtpTransceiver;
   screenTransceiver: RTCRtpTransceiver;
 };
@@ -53,10 +55,8 @@ const RTC_DEBUG_LABELS = new Set([
   "peer:created",
   "track:received",
   "negotiate:start",
-  "negotiate:queued",
   "negotiate:offer-sent",
   "signal:offer:ignored",
-  "signal:offer:rollback",
   "signal:answer:ignored",
   "signal:error",
 ]);
@@ -133,7 +133,6 @@ export class RTCController {
   }
 
   async setAudioInputDevice(deviceId: string) {
-    this.log("audio-input:set", { deviceId });
     if (this.audioInputDeviceId === deviceId) {
       return;
     }
@@ -144,7 +143,6 @@ export class RTCController {
   }
 
   async setNoiseSuppression(enabled: boolean) {
-    this.log("noise-suppression:set", { enabled });
     if (this.noiseSuppressionEnabled === enabled) {
       return;
     }
@@ -155,15 +153,9 @@ export class RTCController {
   }
 
   async prewarmAudio() {
-    const startedAt = performance.now();
-    this.log("prewarmAudio:start", {
-      deviceId: this.audioInputDeviceId || "auto",
-      noiseSuppressionEnabled: this.noiseSuppressionEnabled,
-    });
     try {
       const stream = await this.getOrAcquireAudioStream();
       if (this.localAudioStream) {
-        this.log("prewarmAudio:reused-local", { elapsedMs: Math.round(performance.now() - startedAt) });
         return this.localAudioStream;
       }
       if (this.prewarmedAudioStream && this.prewarmedAudioStream !== stream) {
@@ -173,13 +165,8 @@ export class RTCController {
       }
       this.prewarmedAudioStream = stream;
       this.schedulePrewarmRelease();
-      this.log("prewarmAudio:completed", { elapsedMs: Math.round(performance.now() - startedAt) });
       return stream;
     } catch (error) {
-      this.log("prewarmAudio:error", {
-        message: error instanceof Error ? error.message : String(error),
-        elapsedMs: Math.round(performance.now() - startedAt),
-      });
       throw error;
     }
   }
@@ -194,10 +181,7 @@ export class RTCController {
       void this.stopScreenShare(true);
     });
 
-    for (const wrapper of this.peers.values()) {
-      await this.ensureLocalTracks(wrapper);
-      await this.negotiate(wrapper);
-    }
+    await this.applyLocalTracksToAllPeers();
   }
 
   async stopScreenShare(notifyServer: boolean) {
@@ -205,11 +189,7 @@ export class RTCController {
     this.stopTrackGroup(this.localScreenStream);
     this.localScreenStream = null;
     this.onLocalScreenChanged(null);
-
-    for (const wrapper of this.peers.values()) {
-      await this.ensureLocalTracks(wrapper);
-      await this.negotiate(wrapper);
-    }
+    await this.applyLocalTracksToAllPeers();
 
     if (notifyServer && this.getCurrentVoiceChannelId()) {
       this.socket.send("screen.state", {
@@ -221,31 +201,27 @@ export class RTCController {
 
   async handlePresenceSnapshot(members: PresenceMember[]) {
     const startedAt = performance.now();
-    this.log("presence.snapshot:start", { members: members.length });
-    const tasks = members
-      .filter((member) => member.user.id !== this.getCurrentUser()?.id)
-      .map(async (member) => {
-        const wrapper = await this.ensurePeer(member.user, true);
-        await this.negotiate(wrapper);
-        if (member.screenSharing) {
-          this.socket.send("screen.sync_request", {
-            channelId: this.getCurrentVoiceChannelId(),
-            targetUserId: member.user.id,
-          });
-        }
-      });
-    await Promise.all(tasks);
-    this.log("presence.snapshot:completed", { members: members.length, elapsedMs: Math.round(performance.now() - startedAt) });
+    const selfId = this.getCurrentUser()?.id;
+    const seen = new Set<number>();
+
+    for (const member of members) {
+      if (member.user.id === selfId) continue;
+      seen.add(member.user.id);
+      await this.ensurePeer(member.user, true);
+    }
+
+    for (const [userId] of this.peers) {
+      if (!seen.has(userId)) {
+        this.handleMemberLeft(userId);
+      }
+    }
+
+    this.log("joinVoice:audio-ready", { channelId: this.getCurrentVoiceChannelId(), elapsedMs: Math.round(performance.now() - startedAt) });
   }
 
   async handleMemberJoined(member: PresenceMember) {
     if (member.user.id === this.getCurrentUser()?.id) return;
-    this.log("member.joined:handle", { userId: member.user.id, screenSharing: member.screenSharing });
-    const wrapper = await this.ensurePeer(member.user, false);
-    if (this.localScreenStream) {
-      await this.ensureLocalTracks(wrapper);
-      await this.negotiate(wrapper);
-    }
+    await this.ensurePeer(member.user, false);
   }
 
   handleMemberLeft(userId: number) {
@@ -259,33 +235,32 @@ export class RTCController {
 
   async handleSignal(type: string, payload: SignalPayload) {
     try {
-      this.log("signal:received", { type, sourceUserId: payload.sourceUserId, targetUserId: payload.targetUserId });
       const peerUser = this.lookupUser(payload.sourceUserId);
       if (!peerUser) return;
 
       const wrapper = await this.ensurePeer(peerUser, false);
+
       if (type === "screen.sync_request") {
-        if (!this.localScreenStream) return;
-        await this.ensureLocalTracks(wrapper);
-        await this.negotiate(wrapper);
         return;
       }
 
       if (type === "rtc.offer" && payload.sdp) {
-        const collision = wrapper.makingOffer || wrapper.pc.signalingState !== "stable";
-        wrapper.ignoreOffer = !wrapper.polite && collision;
+        const readyForOffer =
+          !wrapper.makingOffer &&
+          (wrapper.pc.signalingState === "stable" || wrapper.isSettingRemoteAnswerPending);
+        const offerCollision = !readyForOffer;
+
+        wrapper.ignoreOffer = !wrapper.polite && offerCollision;
         if (wrapper.ignoreOffer) {
-          this.log("signal:offer:ignored", { userId: wrapper.user.id, collision });
+          this.log("signal:offer:ignored", { userId: wrapper.user.id });
           return;
         }
-        if (collision && wrapper.polite) {
-          this.log("signal:offer:rollback", { userId: wrapper.user.id, signalingState: wrapper.pc.signalingState });
-          await wrapper.pc.setLocalDescription({ type: "rollback" });
-        }
 
+        wrapper.isSettingRemoteAnswerPending = false;
         await wrapper.pc.setRemoteDescription({ type: "offer", sdp: payload.sdp });
-        await this.ensureLocalTracks(wrapper);
-        await wrapper.pc.setLocalDescription(await wrapper.pc.createAnswer());
+        await this.bindLocalTracks(wrapper, true);
+        await this.flushPendingIceCandidates(wrapper);
+        await wrapper.pc.setLocalDescription();
         this.socket.send("rtc.answer", {
           channelId: this.getCurrentVoiceChannelId(),
           targetUserId: payload.sourceUserId,
@@ -302,18 +277,20 @@ export class RTCController {
           });
           return;
         }
+        wrapper.isSettingRemoteAnswerPending = true;
         await wrapper.pc.setRemoteDescription({ type: "answer", sdp: payload.sdp });
+        wrapper.isSettingRemoteAnswerPending = false;
+        await this.flushPendingIceCandidates(wrapper);
         return;
       }
 
       if (type === "rtc.ice_candidate" && payload.candidate) {
-        try {
-          await wrapper.pc.addIceCandidate(JSON.parse(payload.candidate) as RTCIceCandidateInit);
-        } catch (error) {
-          if (!wrapper.ignoreOffer) {
-            console.error(error);
-          }
+        const candidate = JSON.parse(payload.candidate) as RTCIceCandidateInit;
+        if (!wrapper.pc.remoteDescription) {
+          wrapper.pendingIceCandidates.push(candidate);
+          return;
         }
+        await wrapper.pc.addIceCandidate(candidate);
       }
     } catch (error) {
       console.error(error);
@@ -352,7 +329,6 @@ export class RTCController {
       peers: this.peers.size,
     });
     const nextStream = await this.acquireAudioStream();
-    const [nextTrack] = nextStream.getAudioTracks();
 
     this.stopTrackGroup(this.localAudioStream);
     this.localAudioStream = nextStream;
@@ -360,10 +336,7 @@ export class RTCController {
     this.clearPrewarmReleaseTimer();
     this.onLocalAudioChanged(this.localAudioStream);
 
-    for (const wrapper of this.peers.values()) {
-      await wrapper.audioTransceiver.sender.replaceTrack(nextTrack || null);
-      wrapper.audioTransceiver.direction = nextTrack ? "sendrecv" : "recvonly";
-    }
+    await this.applyLocalTracksToAllPeers();
     this.log("refreshAudioInput:completed", { peers: this.peers.size, elapsedMs: Math.round(performance.now() - startedAt) });
   }
 
@@ -471,7 +444,7 @@ export class RTCController {
 
   private buildPreferredAudioConstraints(): MediaTrackConstraints {
     return {
-      deviceId: this.getExplicitAudioDeviceId() ? { exact: this.getExplicitAudioDeviceId()! } : undefined,
+      deviceId: this.getExplicitAudioDeviceId() ? { exact: this.getExplicitAudioDeviceId() } : undefined,
       noiseSuppression: this.noiseSuppressionEnabled,
       echoCancellation: true,
       autoGainControl: true,
@@ -492,7 +465,6 @@ export class RTCController {
       this.stopTrackGroup(this.prewarmedAudioStream);
       this.prewarmedAudioStream = null;
       this.prewarmReleaseTimer = null;
-      this.log("prewarmAudio:released", { ttlMs: 30000 });
     }, 30000);
   }
 
@@ -502,17 +474,22 @@ export class RTCController {
     this.prewarmReleaseTimer = null;
   }
 
-  private discardPrewarmedAudio(reason: string) {
+  private discardPrewarmedAudio(_reason: string) {
     if (!this.prewarmedAudioStream) return;
     this.stopTrackGroup(this.prewarmedAudioStream);
     this.prewarmedAudioStream = null;
     this.clearPrewarmReleaseTimer();
-    this.log("prewarmAudio:discarded", { reason });
   }
 
-  private async ensurePeer(user: User, shouldOffer: boolean) {
+  private async ensurePeer(user: User, initialOfferOwner: boolean) {
     const existing = this.peers.get(user.id);
-    if (existing) return existing;
+    if (existing) {
+      if (initialOfferOwner) {
+        existing.initialOfferOwner = true;
+        await this.bindLocalTracks(existing, true);
+      }
+      return existing;
+    }
 
     const currentUser = this.getCurrentUser();
     if (!currentUser) {
@@ -534,11 +511,20 @@ export class RTCController {
       polite: currentUser.id > user.id,
       makingOffer: false,
       ignoreOffer: false,
-      initiated: shouldOffer,
-      queuedNegotiation: false,
+      isSettingRemoteAnswerPending: false,
+      initialOfferOwner,
+      hasBoundLocalTracks: false,
+      pendingIceCandidates: [],
       audioTransceiver,
       screenTransceiver,
     };
+
+    pc.addEventListener("negotiationneeded", () => {
+      if (!wrapper.initialOfferOwner && !wrapper.hasBoundLocalTracks) {
+        return;
+      }
+      void this.sendOffer(wrapper);
+    });
 
     pc.addEventListener("icecandidate", (event) => {
       if (!event.candidate) return;
@@ -564,6 +550,18 @@ export class RTCController {
         current.screenStream = event.streams[0] || new MediaStream([event.track]);
       }
 
+      event.track.addEventListener("ended", () => {
+        const media = this.remoteMedia.get(user.id);
+        if (!media) return;
+        if (event.track.kind === "audio") {
+          media.audioStream = null;
+        } else if (event.track.kind === "video") {
+          media.screenStream = null;
+        }
+        this.remoteMedia.set(user.id, media);
+        this.onMediaChanged(new Map(this.remoteMedia));
+      });
+
       this.remoteMedia.set(user.id, current);
       this.onMediaChanged(new Map(this.remoteMedia));
     });
@@ -574,60 +572,76 @@ export class RTCController {
       }
     });
 
-    await this.ensureLocalTracks(wrapper);
     this.peers.set(user.id, wrapper);
-    this.log("peer:created", { userId: user.id, shouldOffer });
+    if (initialOfferOwner) {
+      await this.bindLocalTracks(wrapper, true);
+    }
+    this.log("peer:created", { userId: user.id, shouldOffer: initialOfferOwner });
     return wrapper;
   }
 
-  private async ensureLocalTracks(wrapper: PeerWrapper) {
-    const [audioTrack] = this.localAudioStream?.getAudioTracks() || [];
-    const [screenTrack] = this.localScreenStream?.getVideoTracks() || [];
+  private async bindLocalTracks(wrapper: PeerWrapper, includeLocalTracks: boolean) {
+    const [audioTrack] = includeLocalTracks ? this.localAudioStream?.getAudioTracks() || [] : [];
+    const [screenTrack] = includeLocalTracks ? this.localScreenStream?.getVideoTracks() || [] : [];
 
     await wrapper.audioTransceiver.sender.replaceTrack(audioTrack || null);
     wrapper.audioTransceiver.direction = audioTrack ? "sendrecv" : "recvonly";
 
     await wrapper.screenTransceiver.sender.replaceTrack(screenTrack || null);
     wrapper.screenTransceiver.direction = screenTrack ? "sendrecv" : "recvonly";
+
+    wrapper.hasBoundLocalTracks = includeLocalTracks;
   }
 
-  private async negotiate(wrapper: PeerWrapper) {
+  private async applyLocalTracksToAllPeers() {
+    await Promise.all(
+      Array.from(this.peers.values()).map(async (wrapper) => {
+        await this.bindLocalTracks(wrapper, true);
+      }),
+    );
+  }
+
+  private async sendOffer(wrapper: PeerWrapper) {
+    const pc = wrapper.pc;
     if (wrapper.makingOffer) {
-      wrapper.queuedNegotiation = true;
-      this.log("negotiate:queued", { userId: wrapper.user.id, reason: "making-offer" });
       return;
     }
-    if (wrapper.pc.signalingState !== "stable") {
-      wrapper.queuedNegotiation = true;
-      this.log("negotiate:queued", {
-        userId: wrapper.user.id,
-        reason: "signaling-not-stable",
-        signalingState: wrapper.pc.signalingState,
-      });
+    if (pc.signalingState !== "stable") {
       return;
     }
     const startedAt = performance.now();
     try {
-      this.log("negotiate:start", { userId: wrapper.user.id });
       wrapper.makingOffer = true;
-      await wrapper.pc.setLocalDescription(await wrapper.pc.createOffer());
+      this.log("negotiate:start", { userId: wrapper.user.id });
+      await pc.setLocalDescription();
       this.socket.send("rtc.offer", {
         channelId: this.getCurrentVoiceChannelId(),
         targetUserId: wrapper.user.id,
-        sdp: wrapper.pc.localDescription?.sdp,
+        sdp: pc.localDescription?.sdp,
       });
-      wrapper.initiated = true;
-      this.log("negotiate:offer-sent", { userId: wrapper.user.id, elapsedMs: Math.round(performance.now() - startedAt) });
+      this.log("negotiate:offer-sent", {
+        userId: wrapper.user.id,
+        elapsedMs: Math.round(performance.now() - startedAt),
+      });
     } catch (error) {
       console.error(error);
       this.onError("WebRTC 协商失败，请刷新后重试");
     } finally {
       wrapper.makingOffer = false;
-      if (wrapper.queuedNegotiation) {
-        wrapper.queuedNegotiation = false;
-        queueMicrotask(() => {
-          void this.negotiate(wrapper);
-        });
+    }
+  }
+
+  private async flushPendingIceCandidates(wrapper: PeerWrapper) {
+    if (!wrapper.pc.remoteDescription || !wrapper.pendingIceCandidates.length) return;
+    const queued = [...wrapper.pendingIceCandidates];
+    wrapper.pendingIceCandidates = [];
+    for (const candidate of queued) {
+      try {
+        await wrapper.pc.addIceCandidate(candidate);
+      } catch (error) {
+        if (!wrapper.ignoreOffer) {
+          console.error(error);
+        }
       }
     }
   }

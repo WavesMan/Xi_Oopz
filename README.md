@@ -68,12 +68,83 @@ Gin 会优先服务 `frontend/dist`；如果 dist 还没构建，会回退到仓
 ## 环境变量
 
 - `PORT`
+- `HTTPS_ENABLED`
+- `TLS_CERT_FILE`
+- `TLS_KEY_FILE`
 - `MYSQL_DSN`
 - `REDIS_ADDR`
 - `REDIS_PASSWORD`
 - `AUTH_SECRET`
 
 默认本地值已经和 `docker-compose.yml` 对齐。
+
+## 一键本地 HTTPS 调试
+
+为了在局域网多设备上测试 WebRTC 麦克风、屏幕共享和 `wss`，推荐直接启用本地 HTTPS。
+
+1. 先生成本地证书，例如使用 `mkcert`：
+
+```bash
+mkcert -install
+mkcert localhost 127.0.0.1 192.168.1.100
+```
+
+2. 把证书路径写进 `.env`：
+
+```bash
+HTTPS_ENABLED=true
+PORT=8443
+TLS_CERT_FILE=/absolute/path/to/localhost+2.pem
+TLS_KEY_FILE=/absolute/path/to/localhost+2-key.pem
+```
+
+3. 一键启动 HTTPS 版：
+
+```bash
+./scripts/run-local-https.sh
+```
+
+4. 访问：
+
+```text
+https://localhost:8443
+https://你的局域网IP:8443
+```
+
+前端 WebSocket 会根据页面协议自动切换成 `wss://`，不需要额外改代码。
+
+说明：
+
+- 如果其他设备要信任这张本地证书，需要在测试设备里安装并信任 `mkcert` 生成的本地根证书
+- 如果没有配置 `TLS_CERT_FILE` / `TLS_KEY_FILE`，服务会继续按 HTTP 模式运行
+
+## 服务器部署（Nginx + Gin）
+
+如果你的服务器已经有 MySQL 和 Redis，只需要部署：
+
+- `frontend/dist`
+- Gin 二进制
+- Nginx 反向代理
+
+推荐目录：
+
+```text
+/home/oopz/oopz-live/
+├── frontend/dist
+├── release/oopz-live-linux-amd64
+└── deploy/
+```
+
+本仓库提供：
+
+- Nginx 配置模板：[deploy/nginx/oopz.xixiu.top.conf](/Users/xixiu/Documents/New%20project/deploy/nginx/oopz.xixiu.top.conf)
+- systemd 模板：[deploy/systemd/oopz-live.service](/Users/xixiu/Documents/New%20project/deploy/systemd/oopz-live.service)
+
+说明：
+
+- Nginx 代理 `https://oopz.xixiu.top/api` 和 `wss://oopz.xixiu.top/ws` 到本机 Gin `127.0.0.1:18080`
+- 静态前端由 Nginx 直接从 `frontend/dist` 提供
+- Gin 不需要再自己启 HTTPS，线上 TLS 终止交给 Nginx
 
 ## 关键流程
 

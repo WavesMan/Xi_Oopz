@@ -1,0 +1,24 @@
+[Unit]
+Description=Oopz Live Gin Server
+After=network.target
+
+[Service]
+Type=simple
+User=oopz
+Group=oopz
+WorkingDirectory=/home/oopz/oopz-live
+Environment=PORT=18080
+Environment=MYSQL_DSN=root:password@tcp(127.0.0.1:3306)/oopz?parseTime=true&multiStatements=true
+Environment=REDIS_ADDR=127.0.0.1:6379
+Environment=AUTH_SECRET=replace-with-your-secret
+Environment=EMAIL_ENABLED=true
+Environment=EMAIL_HOST=smtp.qq.com
+Environment=EMAIL_PORT=587
+Environment=EMAIL_USER=replace-with-your-email
+Environment=EMAIL_PASSWORD=replace-with-your-password
+ExecStart=/home/oopz/oopz-live/release/oopz-live-linux-amd64
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
