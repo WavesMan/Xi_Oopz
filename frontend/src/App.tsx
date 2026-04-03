@@ -111,12 +111,14 @@ export function App() {
   const [micEnabled, setMicEnabled] = useState(true);
   const [deafened, setDeafened] = useState(false);
   const [showAudioSettings, setShowAudioSettings] = useState(false);
+  const [showHeadphoneSettings, setShowHeadphoneSettings] = useState(false);
   const [showProfileMenu, setShowProfileMenu] = useState(false);
   const [audioInputs, setAudioInputs] = useState<AudioInputOption[]>([]);
   const [selectedAudioInputId, setSelectedAudioInputId] = useState("");
   const [audioDevicesLoading, setAudioDevicesLoading] = useState(true);
   const [audioPrewarming, setAudioPrewarming] = useState(false);
   const [noiseSuppressionEnabled, setNoiseSuppressionEnabled] = useState(true);
+  const [remoteVolume, setRemoteVolume] = useState(72);
   const [screenSharing, setScreenSharing] = useState(false);
   const [messageDraft, setMessageDraft] = useState("");
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
@@ -143,6 +145,7 @@ export function App() {
   const messageListRef = useRef<HTMLDivElement | null>(null);
   const messageInputRef = useRef<HTMLTextAreaElement | null>(null);
   const audioSettingsCloseTimerRef = useRef<number | null>(null);
+  const headphoneSettingsCloseTimerRef = useRef<number | null>(null);
   const audioBootstrapStartedRef = useRef(false);
   const joinTraceRef = useRef<{ id: number; startedAt: number; channelId: number } | null>(null);
   const leaveTraceRef = useRef<{ id: number; startedAt: number; channelId: number | null } | null>(null);
@@ -750,6 +753,9 @@ export function App() {
 
   async function toggleMic() {
     const next = !micEnabled;
+    if (next && deafened) {
+      setDeafened(false);
+    }
     setMicEnabled(next);
     await rtcRef.current?.toggleMic(next);
     if (currentVoiceChannelId) {
@@ -760,12 +766,20 @@ export function App() {
     }
   }
 
-  function toggleDeafen() {
-    setDeafened((value) => {
-      const next = !value;
-      setStatus(next ? "已切换到耳机静听" : "已关闭耳机静听");
-      return next;
-    });
+  async function toggleDeafen() {
+    const next = !deafened;
+    setDeafened(next);
+    if (next && micEnabled) {
+      setMicEnabled(false);
+      await rtcRef.current?.toggleMic(false);
+      if (currentVoiceChannelId) {
+        socketRef.current?.send("voice.state", {
+          channelId: currentVoiceChannelId,
+          micEnabled: false,
+        });
+      }
+    }
+    setStatus(next ? "已开启耳机静听，并自动关闭麦克风" : "已关闭耳机静听");
   }
 
   async function handleAudioInputChange(deviceId: string) {
@@ -832,6 +846,24 @@ export function App() {
     audioSettingsCloseTimerRef.current = window.setTimeout(() => {
       setShowAudioSettings(false);
       audioSettingsCloseTimerRef.current = null;
+    }, 180);
+  }
+
+  function openHeadphoneSettings() {
+    if (headphoneSettingsCloseTimerRef.current) {
+      window.clearTimeout(headphoneSettingsCloseTimerRef.current);
+      headphoneSettingsCloseTimerRef.current = null;
+    }
+    setShowHeadphoneSettings(true);
+  }
+
+  function scheduleCloseHeadphoneSettings() {
+    if (headphoneSettingsCloseTimerRef.current) {
+      window.clearTimeout(headphoneSettingsCloseTimerRef.current);
+    }
+    headphoneSettingsCloseTimerRef.current = window.setTimeout(() => {
+      setShowHeadphoneSettings(false);
+      headphoneSettingsCloseTimerRef.current = null;
     }, 180);
   }
 
@@ -971,6 +1003,9 @@ export function App() {
           }
           return next;
         });
+        if (payload.userId) {
+          rtcRef.current?.handleVoiceState(payload.userId as number, Boolean(payload.micEnabled));
+        }
         break;
       case "screen.state":
         if (payload.userId === currentUserRef.current?.id) {
@@ -984,8 +1019,12 @@ export function App() {
           }
           return next;
         });
+        if (payload.userId) {
+          rtcRef.current?.handleScreenState(payload.userId as number, Boolean(payload.screenSharing));
+        }
         break;
       case "screen.sync_request":
+      case "media.sync_request":
       case "rtc.offer":
       case "rtc.answer":
       case "rtc.ice_candidate":
@@ -1156,14 +1195,52 @@ export function App() {
                   </div>
                 ) : null}
               </div>
-              <button
-                className={`sidebar-icon-button ${deafened ? "sidebar-icon-button--active" : ""}`}
-                title={deafened ? "关闭耳机静听" : "开启耳机静听"}
-                aria-label={deafened ? "关闭耳机静听" : "开启耳机静听"}
-                onClick={toggleDeafen}
+              <div
+                className="mic-settings-anchor"
+                onMouseEnter={openHeadphoneSettings}
+                onMouseLeave={scheduleCloseHeadphoneSettings}
               >
-                <HeadphoneIcon />
-              </button>
+                <button
+                  className={`sidebar-icon-button ${deafened ? "sidebar-icon-button--active" : ""}`}
+                  title={deafened ? "关闭耳机静听" : "开启耳机静听"}
+                  aria-label={deafened ? "关闭耳机静听" : "开启耳机静听"}
+                  onClick={() => void toggleDeafen()}
+                >
+                  <HeadphoneIcon />
+                </button>
+                {showHeadphoneSettings ? (
+                  <div className="audio-settings-panel" onMouseEnter={openHeadphoneSettings} onMouseLeave={scheduleCloseHeadphoneSettings}>
+                    <div className="audio-settings-panel__status">
+                      <span className={`audio-settings-panel__status-dot ${deafened ? "" : "audio-settings-panel__status-dot--loading"}`} />
+                      <strong>{deafened ? "耳机静听已开启" : "远端声音输出中"}</strong>
+                    </div>
+                    <div className="audio-settings-panel__slider">
+                      <input
+                        type="range"
+                        min="0"
+                        max="100"
+                        value={remoteVolume}
+                        aria-label="远端音量"
+                        onChange={(event) => setRemoteVolume(Number(event.target.value))}
+                      />
+                    </div>
+                    <div className="audio-settings-panel__line" />
+                    <label className="audio-switch-row">
+                      <div>
+                        <strong>耳机静听</strong>
+                        <span>开启后听不到任何人，并自动关闭麦克风</span>
+                      </div>
+                      <button
+                        type="button"
+                        className={`switch-button ${deafened ? "switch-button--active" : ""}`}
+                        onClick={() => void toggleDeafen()}
+                      >
+                        <span />
+                      </button>
+                    </label>
+                  </div>
+                ) : null}
+              </div>
               <button
                 className="sidebar-icon-button sidebar-icon-button--danger"
                 title="挂断通话"
@@ -1296,7 +1373,7 @@ export function App() {
       </aside>
 
       <main className="main-panel">
-        <RemoteAudioLayer remoteMedia={remoteMedia} selfUserId={user?.id || 0} />
+        <RemoteAudioLayer remoteMedia={remoteMedia} selfUserId={user?.id || 0} deafened={deafened} remoteVolume={remoteVolume} />
         <div className="top-utility-bar">
           <div className="top-utility-bar__left">
             <button className="utility-circle">
@@ -1787,9 +1864,13 @@ function VoiceAvatarOrb({
 function RemoteAudioLayer({
   remoteMedia,
   selfUserId,
+  deafened,
+  remoteVolume,
 }: {
   remoteMedia: Map<number, RemoteMedia>;
   selfUserId: number;
+  deafened: boolean;
+  remoteVolume: number;
 }) {
   const audioRefs = useRef(new Map<number, HTMLAudioElement>());
 
@@ -1804,7 +1885,8 @@ function RemoteAudioLayer({
       if (element.srcObject !== entry.audioStream) {
         element.srcObject = entry.audioStream;
       }
-      element.muted = false;
+      element.muted = deafened;
+      element.volume = Math.max(0, Math.min(1, remoteVolume / 100));
       void element.play().catch((error) => {
         console.error("remote audio play failed", error);
       });
@@ -1815,7 +1897,7 @@ function RemoteAudioLayer({
       element.pause();
       element.srcObject = null;
     });
-  }, [remoteMedia, selfUserId]);
+  }, [deafened, remoteMedia, remoteVolume, selfUserId]);
 
   return (
     <div className="remote-audio-layer" aria-hidden="true">

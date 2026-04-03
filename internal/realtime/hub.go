@@ -257,7 +257,7 @@ func (h *Hub) Handle(client *Client, raw []byte) {
 			return
 		}
 		h.handleScreenState(client, payload)
-	case "rtc.offer", "rtc.answer", "rtc.ice_candidate", "screen.sync_request":
+	case "rtc.offer", "rtc.answer", "rtc.ice_candidate", "screen.sync_request", "media.sync_request":
 		var payload RTCSignalPayload
 		if err := json.Unmarshal(envelope.Payload, &payload); err != nil {
 			client.sendJSON("error", map[string]string{"message": "invalid rtc payload"})

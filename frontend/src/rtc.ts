@@ -20,7 +20,10 @@ type SignalPayload = {
   targetUserId: number;
   sdp?: string;
   candidate?: string;
+  kind?: "audio" | "screen";
 };
+
+type MediaSyncKind = "audio" | "screen";
 
 const DEFAULT_ICE_SERVERS: RTCIceServer[] = [
   { urls: "stun:stun.l.google.com:19302" },
@@ -62,6 +65,10 @@ const RTC_DEBUG_LABELS = new Set([
 ]);
 
 export class RTCController {
+  private static readonly MEDIA_RECONNECT_DELAY_MS = 1500;
+  private static readonly MEDIA_RECONNECT_MAX_ATTEMPTS = 5;
+  private static readonly PEER_DISCONNECT_GRACE_MS = 5000;
+
   private localAudioStream: MediaStream | null = null;
   private localScreenStream: MediaStream | null = null;
   private prewarmedAudioStream: MediaStream | null = null;
@@ -69,6 +76,9 @@ export class RTCController {
   private prewarmReleaseTimer: number | null = null;
   private peers = new Map<number, PeerWrapper>();
   private remoteMedia = new Map<number, RemoteMedia>();
+  private mediaReconnectAttempts = new Map<string, number>();
+  private mediaReconnectTimers = new Map<string, number>();
+  private peerDisconnectTimers = new Map<number, number>();
   private audioInputDeviceId = "";
   private noiseSuppressionEnabled = true;
   private micEnabled = true;
@@ -208,6 +218,8 @@ export class RTCController {
       if (member.user.id === selfId) continue;
       seen.add(member.user.id);
       await this.ensurePeer(member.user, true);
+      this.ensureMediaFlow(member.user.id, "audio", "presence.snapshot");
+      this.ensureMediaFlow(member.user.id, "screen", "presence.snapshot");
     }
 
     for (const [userId] of this.peers) {
@@ -222,9 +234,14 @@ export class RTCController {
   async handleMemberJoined(member: PresenceMember) {
     if (member.user.id === this.getCurrentUser()?.id) return;
     await this.ensurePeer(member.user, false);
+    this.ensureMediaFlow(member.user.id, "audio", "member.joined");
+    this.ensureMediaFlow(member.user.id, "screen", "member.joined");
   }
 
   handleMemberLeft(userId: number) {
+    this.clearMediaReconnect(userId, "audio");
+    this.clearMediaReconnect(userId, "screen");
+    this.clearPeerDisconnectTimer(userId);
     const wrapper = this.peers.get(userId);
     if (!wrapper) return;
     wrapper.pc.close();
@@ -240,7 +257,14 @@ export class RTCController {
 
       const wrapper = await this.ensurePeer(peerUser, false);
 
-      if (type === "screen.sync_request") {
+      if ((type === "screen.sync_request" && this.localScreenStream) || type === "media.sync_request") {
+        const requestedKind: MediaSyncKind =
+          type === "screen.sync_request" ? "screen" : payload.kind === "audio" ? "audio" : "screen";
+        if (requestedKind === "screen" && !this.localScreenStream) {
+          return;
+        }
+        await this.bindLocalTracks(wrapper, true);
+        await this.sendOffer(wrapper);
         return;
       }
 
@@ -545,9 +569,11 @@ export class RTCController {
 
       if (event.track.kind === "audio") {
         current.audioStream = new MediaStream([event.track]);
+        this.clearMediaReconnect(user.id, "audio");
       }
       if (event.track.kind === "video") {
         current.screenStream = event.streams[0] || new MediaStream([event.track]);
+        this.clearMediaReconnect(user.id, "screen");
       }
 
       event.track.addEventListener("ended", () => {
@@ -555,11 +581,21 @@ export class RTCController {
         if (!media) return;
         if (event.track.kind === "audio") {
           media.audioStream = null;
+          this.ensureMediaFlow(user.id, "audio", "remote-track-ended");
         } else if (event.track.kind === "video") {
           media.screenStream = null;
+          this.ensureMediaFlow(user.id, "screen", "remote-track-ended");
         }
         this.remoteMedia.set(user.id, media);
         this.onMediaChanged(new Map(this.remoteMedia));
+      });
+
+      event.track.addEventListener("mute", () => {
+        if (event.track.kind === "audio") {
+          this.ensureMediaFlow(user.id, "audio", "remote-track-muted");
+        } else if (event.track.kind === "video") {
+          this.ensureMediaFlow(user.id, "screen", "remote-track-muted");
+        }
       });
 
       this.remoteMedia.set(user.id, current);
@@ -567,7 +603,17 @@ export class RTCController {
     });
 
     pc.addEventListener("connectionstatechange", () => {
-      if (["failed", "disconnected", "closed"].includes(pc.connectionState)) {
+      if (pc.connectionState === "connected") {
+        this.clearPeerDisconnectTimer(user.id);
+        return;
+      }
+      if (pc.connectionState === "disconnected") {
+        this.schedulePeerDisconnectCleanup(user.id);
+        this.ensureMediaFlow(user.id, "audio", "peer-disconnected");
+        this.ensureMediaFlow(user.id, "screen", "peer-disconnected");
+        return;
+      }
+      if (["failed", "closed"].includes(pc.connectionState)) {
         this.handleMemberLeft(user.id);
       }
     });
@@ -647,6 +693,13 @@ export class RTCController {
   }
 
   private closeAllPeers() {
+    for (const key of this.mediaReconnectTimers.keys()) {
+      const [rawUserId, kind] = key.split(":");
+      this.clearMediaReconnect(Number(rawUserId), kind as MediaSyncKind);
+    }
+    for (const userId of this.peerDisconnectTimers.keys()) {
+      this.clearPeerDisconnectTimer(userId);
+    }
     for (const wrapper of this.peers.values()) {
       wrapper.pc.close();
     }
@@ -663,5 +716,108 @@ export class RTCController {
     const voiceUser = this.getVoiceMembers().get(userId)?.user;
     if (voiceUser) return voiceUser;
     return this.getMembers().find((member) => member.id === userId) || null;
+  }
+
+  handleScreenState(userId: number, screenSharing: boolean) {
+    if (!screenSharing) {
+      this.clearMediaReconnect(userId, "screen");
+      return;
+    }
+    this.ensureMediaFlow(userId, "screen", "screen.state");
+  }
+
+  handleVoiceState(userId: number, micEnabled: boolean) {
+    if (!micEnabled) {
+      this.clearMediaReconnect(userId, "audio");
+      return;
+    }
+    this.ensureMediaFlow(userId, "audio", "voice.state");
+  }
+
+  private ensureMediaFlow(userId: number, kind: MediaSyncKind, reason: string) {
+    if (!this.getCurrentVoiceChannelId()) return;
+    if (userId === this.getCurrentUser()?.id) return;
+    const voiceMember = this.getVoiceMembers().get(userId);
+    if (!voiceMember) return;
+    if (kind === "screen" && !voiceMember.screenSharing) return;
+    const media = this.remoteMedia.get(userId);
+    const existingStream = kind === "audio" ? media?.audioStream : media?.screenStream;
+    if (existingStream) {
+      this.clearMediaReconnect(userId, kind);
+      return;
+    }
+    this.requestMediaSync(userId, kind, reason);
+  }
+
+  private requestMediaSync(userId: number, kind: MediaSyncKind, reason: string) {
+    if (!this.getCurrentVoiceChannelId()) return;
+    const voiceMember = this.getVoiceMembers().get(userId);
+    if (!voiceMember) {
+      this.clearMediaReconnect(userId, kind);
+      return;
+    }
+    if (kind === "screen" && !voiceMember.screenSharing) {
+      this.clearMediaReconnect(userId, kind);
+      return;
+    }
+    const reconnectKey = this.mediaReconnectKey(userId, kind);
+    const attempt = (this.mediaReconnectAttempts.get(reconnectKey) || 0) + 1;
+    if (attempt > RTCController.MEDIA_RECONNECT_MAX_ATTEMPTS) {
+      this.clearMediaReconnect(userId, kind);
+      return;
+    }
+    this.mediaReconnectAttempts.set(reconnectKey, attempt);
+    this.clearMediaReconnectTimerOnly(reconnectKey);
+    this.socket.send("media.sync_request", {
+      channelId: this.getCurrentVoiceChannelId(),
+      targetUserId: userId,
+      kind,
+      reason,
+      attempt,
+    });
+    const timer = window.setTimeout(() => {
+      this.mediaReconnectTimers.delete(reconnectKey);
+      this.requestMediaSync(userId, kind, "retry");
+    }, RTCController.MEDIA_RECONNECT_DELAY_MS);
+    this.mediaReconnectTimers.set(reconnectKey, timer);
+  }
+
+  private clearMediaReconnect(userId: number, kind: MediaSyncKind) {
+    const reconnectKey = this.mediaReconnectKey(userId, kind);
+    this.clearMediaReconnectTimerOnly(reconnectKey);
+    this.mediaReconnectAttempts.delete(reconnectKey);
+  }
+
+  private clearMediaReconnectTimerOnly(reconnectKey: string) {
+    const timer = this.mediaReconnectTimers.get(reconnectKey);
+    if (!timer) return;
+    window.clearTimeout(timer);
+    this.mediaReconnectTimers.delete(reconnectKey);
+  }
+
+  private schedulePeerDisconnectCleanup(userId: number) {
+    if (this.peerDisconnectTimers.has(userId)) {
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      this.peerDisconnectTimers.delete(userId);
+      const wrapper = this.peers.get(userId);
+      if (!wrapper) return;
+      if (wrapper.pc.connectionState === "disconnected") {
+        this.handleMemberLeft(userId);
+      }
+    }, RTCController.PEER_DISCONNECT_GRACE_MS);
+    this.peerDisconnectTimers.set(userId, timer);
+  }
+
+  private clearPeerDisconnectTimer(userId: number) {
+    const timer = this.peerDisconnectTimers.get(userId);
+    if (!timer) return;
+    window.clearTimeout(timer);
+    this.peerDisconnectTimers.delete(userId);
+  }
+
+  private mediaReconnectKey(userId: number, kind: MediaSyncKind) {
+    return `${userId}:${kind}`;
   }
 }

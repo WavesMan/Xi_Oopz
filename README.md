@@ -1,44 +1,131 @@
 # Oopz Live
 
-一个参考 Discord 交互模式的 WebRTC 连麦与屏幕共享网站 MVP。
+一个参考 Discord 交互方式实现的实时语音、文字聊天、屏幕共享 Web 应用。
+
+项目当前定位是一个可运行、可继续扩展的 MVP，适合做以下场景的原型或二次开发：
+
+- 游戏开黑语音房
+- 小团队在线协作
+- 轻量级社区频道
+- WebRTC / Gin / WebSocket 实时系统练手项目
+
+## 在线能力
+
+- 邮箱验证码注册与登录
+- 多域 Domain 切换
+- 文字频道 / 语音频道
+- 频道文字消息实时广播与持久化
+- 语音频道在线成员实时同步
+- 麦克风开关状态同步
+- 屏幕共享状态同步
+- WebRTC 音频通话
+- WebRTC 屏幕共享
+- 远端音频音量调节
+- 语音 / 共享断流后的自动补连
+- Discord 风格三栏桌面 UI
 
 ## 技术栈
 
 - 前端：React + TypeScript + Vite
-- 后端：Gin + GORM + WebSocket + Redis + MySQL
-- 实时音视频：浏览器 WebRTC mesh
+- 后端：Gin + GORM + WebSocket
+- 数据库：MySQL
+- 缓存 / 在线状态：Redis
+- 实时音视频：浏览器 WebRTC Mesh
 
-## 当前能力
+## 项目截图与交互方向
 
-- 账号注册 / 登录 / token 鉴权
-- 域 / 分类 / 频道模型
-- 域详情、成员列表、频道树、分类创建、频道创建、频道更新接口
-- 频道内文字消息，通过 WS 广播并写入 MySQL
-- 语音房加入 / 离开系统消息，仅在当前频道内通过 WS 实时广播
-- Redis 维护在线语音房与成员 presence
-- WebRTC `offer` / `answer` / `ice_candidate` 信令转发
-- 麦克风开关状态同步
-- 屏幕共享开关状态同步与重协商
-- Discord 风格三栏 UI
+当前 UI 以桌面端频道社交产品为目标，重点参考 Discord / Oopz 这类布局：
 
-## 运行方式
+- 左侧域列表
+- 中间频道树与消息区
+- 右侧在线成员区
+- 顶部语音控制条
+- 语音头像说话高亮
+- 共享屏预览与放大 / 全屏
 
-1. 启动依赖：
+## 适用边界
+
+当前版本采用 WebRTC Mesh 拓扑，每个用户会和房间内其他用户分别建立连接，因此更适合小房间：
+
+- 建议单个语音房控制在 6 人以内
+- 屏幕共享适合少量同时观看用户
+- 如果要做大房间，建议下一步切到 SFU 架构
+
+## 核心功能说明
+
+### 账号系统
+
+- 邮箱验证码发送
+- 注册
+- 登录
+- Bearer Token 鉴权
+- 获取当前用户信息
+
+### 域 / 频道系统
+
+- 所有登录用户默认可见所有域
+- 用户进入域后会被加入域成员列表
+- 每个域有独立域主
+- 域主可创建文字频道和语音频道
+
+### 实时消息
+
+- 普通聊天消息通过 WebSocket 广播
+- 普通聊天消息落 MySQL
+- 语音房加入 / 离开消息只做瞬时广播，不写库
+- 麦克风 / 屏幕共享状态通过 WebSocket 同步
+
+### WebRTC
+
+- `offer / answer / ice_candidate` 走 WebSocket 转发
+- TURN / STUN 支持
+- 麦克风热切换
+- 浏览器基础降噪约束
+- 屏幕共享自动重协商
+- 音频 / 屏幕断流自动补连
+
+## 仓库结构
+
+```text
+.
+├── cmd/server                 # Gin 服务入口
+├── deploy
+│   ├── nginx                  # Nginx 部署模板
+│   └── systemd                # systemd 服务模板
+├── docs                       # 架构说明
+├── frontend                   # React 前端
+├── internal
+│   ├── app                    # 应用启动与路由
+│   ├── auth                   # token 鉴权
+│   ├── config                 # 配置读取
+│   ├── httpapi                # HTTP 接口
+│   ├── models                 # 数据模型
+│   ├── notify                 # 邮件发送
+│   ├── realtime               # WebSocket Hub
+│   └── store                  # GORM + 数据访问
+├── migrations                 # 初始化 SQL
+├── release                    # 预构建部署产物
+└── scripts                    # 启动与辅助脚本
+```
+
+## 本地开发
+
+### 1. 启动依赖
 
 ```bash
 docker compose up -d
 ```
 
-2. 拉取 Go 依赖并启动服务：
+### 2. 启动后端
 
 ```bash
 go mod tidy
 go run ./cmd/server
 ```
 
-服务启动时会自动执行 `GORM AutoMigrate`，确保所需数据表存在。
+服务启动时会执行 `GORM AutoMigrate`，自动确保所需表结构存在。
 
-3. 前端开发：
+### 3. 启动前端开发环境
 
 ```bash
 cd frontend
@@ -46,7 +133,13 @@ npm install
 npm run dev
 ```
 
-如果你想让 Gin 直接服务前端页面，先执行：
+开发模式访问：
+
+```text
+http://localhost:5173
+```
+
+### 4. 让 Gin 直接服务前端
 
 ```bash
 cd frontend
@@ -56,16 +149,53 @@ cd ..
 go run ./cmd/server
 ```
 
-Gin 会优先服务 `frontend/dist`；如果 dist 还没构建，会回退到仓库里的静态原型页。
-
-4. 浏览器打开：
+后端直出访问：
 
 ```text
-前端开发模式: http://localhost:5173
-后端直出模式: http://localhost:8080
+http://localhost:8080
+```
+
+## 一键本地 HTTPS 调试
+
+为了在局域网多设备上测试 WebRTC 麦克风、屏幕共享和 `wss`，项目提供了本地 HTTPS 调试脚本。
+
+### 1. 准备证书
+
+推荐使用 `mkcert`：
+
+```bash
+mkcert -install
+mkcert localhost 127.0.0.1 192.168.1.100
+```
+
+### 2. 配置 `.env`
+
+```bash
+HTTPS_ENABLED=true
+PORT=8443
+TLS_CERT_FILE=/absolute/path/to/cert.pem
+TLS_KEY_FILE=/absolute/path/to/key.pem
+MYSQL_DSN=user:password@tcp(127.0.0.1:3306)/oopz?parseTime=true&multiStatements=true
+REDIS_ADDR=127.0.0.1:6379
+AUTH_SECRET=replace-with-your-secret
+```
+
+### 3. 启动
+
+```bash
+./scripts/run-local-https.sh
+```
+
+### 4. 访问
+
+```text
+https://localhost:8443
+https://你的局域网IP:8443
 ```
 
 ## 环境变量
+
+常用环境变量如下：
 
 - `PORT`
 - `HTTPS_ENABLED`
@@ -75,91 +205,25 @@ Gin 会优先服务 `frontend/dist`；如果 dist 还没构建，会回退到仓
 - `REDIS_ADDR`
 - `REDIS_PASSWORD`
 - `AUTH_SECRET`
+- `EMAIL_ENABLED`
+- `EMAIL_HOST`
+- `EMAIL_PORT`
+- `EMAIL_USER`
+- `EMAIL_PASSWORD`
+- `EMAIL_FROM_NAME`
 
-默认本地值已经和 `docker-compose.yml` 对齐。
+## 主要接口
 
-## 一键本地 HTTPS 调试
+### 鉴权
 
-为了在局域网多设备上测试 WebRTC 麦克风、屏幕共享和 `wss`，推荐直接启用本地 HTTPS。
+- `POST /api/auth/send-verification-code`
+- `POST /api/auth/register`
+- `POST /api/auth/login`
+- `GET /api/auth/me`
 
-1. 先生成本地证书，例如使用 `mkcert`：
+### 域 / 频道
 
-```bash
-mkcert -install
-mkcert localhost 127.0.0.1 192.168.1.100
-```
-
-2. 把证书路径写进 `.env`：
-
-```bash
-HTTPS_ENABLED=true
-PORT=8443
-TLS_CERT_FILE=/absolute/path/to/localhost+2.pem
-TLS_KEY_FILE=/absolute/path/to/localhost+2-key.pem
-```
-
-3. 一键启动 HTTPS 版：
-
-```bash
-./scripts/run-local-https.sh
-```
-
-4. 访问：
-
-```text
-https://localhost:8443
-https://你的局域网IP:8443
-```
-
-前端 WebSocket 会根据页面协议自动切换成 `wss://`，不需要额外改代码。
-
-说明：
-
-- 如果其他设备要信任这张本地证书，需要在测试设备里安装并信任 `mkcert` 生成的本地根证书
-- 如果没有配置 `TLS_CERT_FILE` / `TLS_KEY_FILE`，服务会继续按 HTTP 模式运行
-
-## 服务器部署（Nginx + Gin）
-
-如果你的服务器已经有 MySQL 和 Redis，只需要部署：
-
-- `frontend/dist`
-- Gin 二进制
-- Nginx 反向代理
-
-推荐目录：
-
-```text
-/home/oopz/oopz-live/
-├── frontend/dist
-├── release/oopz-live-linux-amd64
-└── deploy/
-```
-
-本仓库提供：
-
-- Nginx 配置模板：[deploy/nginx/oopz.xixiu.top.conf](/Users/xixiu/Documents/New%20project/deploy/nginx/oopz.xixiu.top.conf)
-- systemd 模板：[deploy/systemd/oopz-live.service](/Users/xixiu/Documents/New%20project/deploy/systemd/oopz-live.service)
-
-说明：
-
-- Nginx 代理 `https://oopz.xixiu.top/api` 和 `wss://oopz.xixiu.top/ws` 到本机 Gin `127.0.0.1:18080`
-- 静态前端由 Nginx 直接从 `frontend/dist` 提供
-- Gin 不需要再自己启 HTTPS，线上 TLS 终止交给 Nginx
-
-## 关键流程
-
-- 首次进入页面注册或登录账号
-- 前端用 Bearer token 请求 `/api/auth/me` 与 `/api/bootstrap`
-- 前端建立 `/ws?token=...&domainId=...` 连接
-- 进入语音频道后，浏览器获取麦克风并发送 `channel.join`
-- 新加入用户收到 `presence.snapshot`，向房内其他成员发起 WebRTC 连接
-- 文本消息 / join / leave / mic / screen 事件通过 WS 广播
-- 普通文本消息持久化到 MySQL，加入 / 离开消息不落库
-- 在线房间与在线人数由 Redis hash / set 维护
-- 屏幕共享支持浏览器内放大预览与系统全屏两种查看方式
-
-## 新增接口
-
+- `POST /api/domains`
 - `GET /api/domains/:domainId`
 - `PATCH /api/domains/:domainId`
 - `GET /api/domains/:domainId/members`
@@ -168,18 +232,175 @@ https://你的局域网IP:8443
 - `POST /api/domains/:domainId/categories`
 - `POST /api/domains/:domainId/channels`
 - `PATCH /api/channels/:channelId`
-- `GET /api/domains/:domainId/channels/:channelId/messages?limit=60&beforeId=123`
 
-## 手测建议
+### 消息
 
-1. 打开两个浏览器会话，例如一个普通窗口加一个无痕窗口。
-2. 分别注册两个不同账号并登录。
-3. 进入同一个语音频道，确认成员列表与在线人数变化。
-4. 在文本频道发送消息，确认另一侧实时收到。
-5. 分别测试开关麦克风与屏幕共享，确认状态同步。
+- `GET /api/domains/:domainId/channels/:channelId/messages`
 
-## 注意事项
+### WebSocket 事件
 
-- 这是 mesh WebRTC 版本，建议单房间控制在 6 人以内
-- 屏幕共享在多数浏览器里要求安全上下文，正式环境请使用 HTTPS
-- 现在的 WebSocket hub 是单节点内存广播，Redis 主要承担在线房间状态；如果要多实例横向扩展，需要继续补 Redis Pub/Sub 或消息总线
+常见事件包括：
+
+- `channel.join`
+- `channel.leave`
+- `chat.send`
+- `chat.message`
+- `voice.state`
+- `screen.state`
+- `rtc.offer`
+- `rtc.answer`
+- `rtc.ice_candidate`
+- `media.sync_request`
+
+## 部署说明
+
+项目支持直接部署到已有 MySQL / Redis 的服务器环境，不依赖 Docker 运行。
+
+### 推荐部署方式
+
+- Nginx：负责 HTTPS、静态文件、WebSocket 反向代理
+- Gin：只监听本机 HTTP 端口，例如 `127.0.0.1:18080`
+- MySQL：使用服务器已有实例
+- Redis：使用服务器已有实例
+
+### 部署产物
+
+仓库已准备：
+
+- Linux `amd64` 二进制：`release/oopz-live-linux-amd64`
+- Linux `arm64` 二进制：`release/oopz-live-linux-arm64`
+- Nginx 模板：`deploy/nginx/oopz.xixiu.top.conf`
+- systemd 模板：`deploy/systemd/oopz-live.service`
+
+### 典型目录结构
+
+```text
+/home/oopz/oopz-live/
+├── frontend/dist
+├── release/oopz-live-linux-amd64
+└── .env
+```
+
+### systemd
+
+将模板复制到：
+
+```text
+/etc/systemd/system/oopz-live.service
+```
+
+然后执行：
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable oopz-live
+sudo systemctl start oopz-live
+sudo systemctl status oopz-live
+```
+
+查看日志：
+
+```bash
+sudo journalctl -u oopz-live -f
+```
+
+### Nginx
+
+将模板复制到：
+
+```text
+/etc/nginx/conf.d/oopz.xixiu.top.conf
+```
+
+或按你的系统习惯放到：
+
+```text
+/etc/nginx/sites-available/oopz.xixiu.top.conf
+/etc/nginx/sites-enabled/oopz.xixiu.top.conf
+```
+
+检查与重载：
+
+```bash
+sudo nginx -t
+sudo systemctl reload nginx
+```
+
+## TURN / STUN
+
+当前前端默认内置：
+
+- Google STUN
+- 自定义 TURN
+
+如果你准备公开部署，建议使用你自己的 TURN 配置，并把凭据改成环境变量或服务端下发，而不是写死在前端代码里。
+
+## 当前实现说明
+
+### 关于“降噪”
+
+当前项目里的“降噪”不是独立 AI 降噪引擎，而是浏览器 `getUserMedia` 约束：
+
+- `noiseSuppression`
+- `echoCancellation`
+- `autoGainControl`
+
+它属于浏览器 / 系统级基础音频处理，不等于专门的第三方实时降噪方案。
+
+### 关于耳机静听
+
+耳机按钮表示“静听”模式：
+
+- 开启后听不到任何远端声音
+- 同时会自动关闭本地麦克风
+- 耳机悬浮面板里可以调远端音量
+
+## 测试建议
+
+### 双端联调
+
+1. 打开两个浏览器会话
+2. 分别注册两个账号
+3. 进入同一个语音频道
+4. 测试双向语音
+5. 测试文字消息
+6. 测试屏幕共享与恢复
+
+### 公网测试
+
+公网部署时，请重点确认：
+
+- 站点启用了 HTTPS
+- WebSocket 走 `wss`
+- Nginx 没有错误限制 `microphone` / `display-capture`
+- TURN 服务器可达
+
+## 已知限制
+
+- 目前是 Mesh 架构，不适合大房间
+- 前端状态与 UI 仍以桌面端为主，移动端未专门优化
+- 屏幕共享与 RTC 恢复逻辑仍属于工程化增强版 MVP，不是 SFU 级实现
+- 多实例部署时，WebSocket 广播层还需要补 Redis Pub/Sub 或消息总线
+
+## 后续方向
+
+- 引入好友 / 邀请体系
+- 域角色与权限细化
+- 频道排序 / 删除 / 转移管理
+- 更稳定的 WebRTC 策略与统计面板
+- SFU 架构升级
+- 移动端与桌面壳封装
+
+## 开源说明
+
+如果你准备把这个项目公开出去，建议在发布前再检查这些内容：
+
+- 是否移除了私有 SMTP 凭据
+- 是否移除了临时自签名证书
+- 是否替换了默认 TURN 账号密码
+- 是否替换了默认 `AUTH_SECRET`
+- 是否清理了仅用于个人环境的部署路径
+
+---
+
+如果这个项目对你有帮助，欢迎继续扩展成更完整的实时社交 / 协作平台。
