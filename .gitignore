@@ -1,0 +1,9 @@
+bin/
+dist/
+tmp/
+.DS_Store
+.env
+.cache/
+frontend/node_modules/
+frontend/dist/
+.idea/
