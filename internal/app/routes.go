@@ -42,8 +42,7 @@ func RegisterStatic(router *gin.Engine) {
 		return
 	}
 
-	router.Static("/assets", "./web/assets")
 	router.GET("/", func(c *gin.Context) {
-		c.File("./web/index.html")
+		c.String(503, "frontend dist not found, please run frontend build first")
 	})
 }
