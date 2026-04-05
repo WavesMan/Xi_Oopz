@@ -32,6 +32,13 @@ type AudioInputOption = {
   label: string;
 };
 
+type Notice = {
+  id: number;
+  kind: "error" | "info";
+  title: string;
+  message: string;
+};
+
 const VOICE_UI_DEBUG_LABELS = new Set([
   "join:start",
   "join:audio-device-applied",
@@ -103,6 +110,7 @@ export function App() {
   const [currentVoiceChannelId, setCurrentVoiceChannelId] = useState<number | null>(null);
   const [wsConnected, setWsConnected] = useState(false);
   const [status, setStatus] = useState("等待初始化");
+  const [notices, setNotices] = useState<Notice[]>([]);
   const [authMode, setAuthMode] = useState<AuthMode>("register");
   const [displayNameInput, setDisplayNameInput] = useState("");
   const [emailInput, setEmailInput] = useState("");
@@ -156,11 +164,13 @@ export function App() {
   const membersRef = useRef<DomainMember[]>([]);
   const currentUserRef = useRef<User | null>(null);
   const iceServersRef = useRef<RTCIceServer[]>([]);
+  const startupAudioStreamRef = useRef<MediaStream | null>(null);
+  const noticeIdRef = useRef(0);
+  const noticeTimersRef = useRef(new Map<number, number>());
   const audioSetupPending = audioDevicesLoading || audioPrewarming;
 
   useEffect(() => {
     if (session) return;
-    audioBootstrapStartedRef.current = false;
     setAudioPrewarming(false);
   }, [session]);
 
@@ -191,6 +201,17 @@ export function App() {
       window.clearInterval(timer);
     };
   }, [verificationCooldown]);
+
+  useEffect(() => {
+    return () => {
+      noticeTimersRef.current.forEach((timer) => {
+        window.clearTimeout(timer);
+      });
+      noticeTimersRef.current.clear();
+      startupAudioStreamRef.current?.getTracks().forEach((track) => track.stop());
+      startupAudioStreamRef.current = null;
+    };
+  }, []);
 
   useEffect(() => {
     const frame = window.requestAnimationFrame(() => {
@@ -257,32 +278,104 @@ export function App() {
   }, [localAudioStream]);
 
   useEffect(() => {
-    if (!rtcRef.current || !session || !user || audioBootstrapStartedRef.current) return;
+    if (!rtcRef.current) return;
+    if (startupAudioStreamRef.current) {
+      rtcRef.current.primePrewarmedAudio(startupAudioStreamRef.current);
+    }
+  }, [session?.token, user?.id, bootstrap?.domain.id]);
+
+  useEffect(() => {
+    if (audioBootstrapStartedRef.current) return;
     audioBootstrapStartedRef.current = true;
     setAudioPrewarming(true);
-    setStatus("正在预加载音频设备...");
-    void rtcRef.current
-      .prewarmAudio()
-      .then(async () => {
-        if (!navigator.mediaDevices?.enumerateDevices) return;
-        const devices = await navigator.mediaDevices.enumerateDevices();
-        const nextInputs = devices
-          .filter((device) => device.kind === "audioinput")
-          .map((device, index) => ({
-            deviceId: device.deviceId,
-            label: device.label || `麦克风 ${index + 1}`,
-          }));
-        setAudioInputs(nextInputs);
-        setSelectedAudioInputId((current) => pickPreferredAudioInputId(nextInputs, current));
-      })
+    setStatus("正在请求麦克风权限...");
+    const bootstrapAudio = async () => {
+      if (!navigator.mediaDevices?.getUserMedia || !navigator.mediaDevices?.enumerateDevices) {
+        setAudioDevicesLoading(false);
+        return;
+      }
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          noiseSuppression: true,
+          echoCancellation: true,
+          autoGainControl: true,
+        },
+        video: false,
+      });
+      startupAudioStreamRef.current?.getTracks().forEach((track) => track.stop());
+      startupAudioStreamRef.current = stream;
+      rtcRef.current?.primePrewarmedAudio(stream);
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const nextInputs = devices
+        .filter((device) => device.kind === "audioinput")
+        .map((device, index) => ({
+          deviceId: device.deviceId,
+          label: device.label || `麦克风 ${index + 1}`,
+        }));
+      setAudioInputs(nextInputs);
+      setSelectedAudioInputId((current) => pickPreferredAudioInputId(nextInputs, current));
+      setStatus("麦克风与音频设备已就绪");
+    };
+    void bootstrapAudio()
       .catch((error) => {
         console.error(error);
+        showError(error, "麦克风初始化失败", "无法获取麦克风权限或音频设备信息");
+        setStatus("麦克风未授权");
       })
       .finally(() => {
+        setAudioDevicesLoading(false);
         setAudioPrewarming(false);
-        setStatus((current) => (current === "正在预加载音频设备..." ? "音频设备已就绪" : current));
       });
-  }, [session, user, bootstrap?.domain.id]);
+  }, []);
+
+  useEffect(() => {
+    if (!rtcRef.current || !session || !user || !startupAudioStreamRef.current) return;
+    rtcRef.current.primePrewarmedAudio(startupAudioStreamRef.current);
+  }, [session, user]);
+
+  useEffect(() => {
+    if (!rtcRef.current || !session || !user || !bootstrap?.domain.id) return;
+    if (localAudioStream) {
+      startupAudioStreamRef.current = null;
+    }
+  }, [bootstrap?.domain.id, localAudioStream, session, user]);
+
+  function pushNotice(kind: Notice["kind"], title: string, message: string) {
+    const id = noticeIdRef.current + 1;
+    noticeIdRef.current = id;
+    setNotices((current) => [...current, { id, kind, title, message }]);
+    const timer = window.setTimeout(() => {
+      setNotices((current) => current.filter((item) => item.id !== id));
+      noticeTimersRef.current.delete(id);
+    }, kind === "error" ? 6400 : 4200);
+    noticeTimersRef.current.set(id, timer);
+  }
+
+  function dismissNotice(id: number) {
+    const timer = noticeTimersRef.current.get(id);
+    if (timer) {
+      window.clearTimeout(timer);
+      noticeTimersRef.current.delete(id);
+    }
+    setNotices((current) => current.filter((item) => item.id !== id));
+  }
+
+  function resolveErrorMessage(error: unknown, fallback: string) {
+    if (error instanceof Error && error.message.trim()) {
+      return error.message;
+    }
+    return fallback;
+  }
+
+  function showError(error: unknown, title: string, fallback: string) {
+    const message = resolveErrorMessage(error, fallback);
+    pushNotice("error", title, message);
+    return message;
+  }
+
+  function showInfo(title: string, message: string) {
+    pushNotice("info", title, message);
+  }
 
   useEffect(() => {
     if (!rtcRef.current) return;
@@ -366,7 +459,10 @@ export function App() {
       (media) => setRemoteMedia(new Map(media)),
       (stream) => setLocalAudioStream(stream),
       (stream) => setLocalScreenStream(stream),
-      (message) => setStatus(message),
+      (message) => {
+        setStatus(message);
+        pushNotice("error", "实时通信异常", message);
+      },
     );
     void rtcRef.current.setAudioInputDevice(selectedAudioInputId);
     void rtcRef.current.setNoiseSuppression(noiseSuppressionEnabled);
@@ -387,6 +483,7 @@ export function App() {
       console.error(error);
       logout();
       setStatus("登录状态已失效，请重新登录");
+      showError(error, "登录状态失效", "登录状态已失效，请重新登录");
     }
   }
 
@@ -408,6 +505,7 @@ export function App() {
     } catch (error) {
       console.error(error);
       setStatus("初始化失败，请检查服务与数据库");
+      showError(error, "初始化失败", "请检查服务与数据库");
     }
   }
 
@@ -444,15 +542,21 @@ export function App() {
 
   async function submitAuth() {
     if (!emailInput.trim() || !passwordInput.trim()) {
-      setStatus("请输入邮箱和密码");
+      const message = "请输入邮箱和密码";
+      setStatus(message);
+      pushNotice("error", "认证信息不完整", message);
       return;
     }
     if (authMode === "register" && !displayNameInput.trim()) {
-      setStatus("请输入昵称");
+      const message = "请输入昵称";
+      setStatus(message);
+      pushNotice("error", "注册信息不完整", message);
       return;
     }
     if (authMode === "register" && !verificationCodeInput.trim()) {
-      setStatus("请输入邮箱验证码");
+      const message = "请输入邮箱验证码";
+      setStatus(message);
+      pushNotice("error", "注册信息不完整", message);
       return;
     }
 
@@ -480,9 +584,11 @@ export function App() {
       setVerificationCodeInput("");
       setVerificationCooldown(0);
       setStatus(authMode === "register" ? "注册成功，正在进入频道" : "登录成功");
+      showInfo(authMode === "register" ? "注册成功" : "登录成功", authMode === "register" ? "账号已创建，正在进入频道" : "欢迎回来");
     } catch (error) {
       console.error(error);
-      setStatus(error instanceof Error ? error.message : "认证失败");
+      setStatus(resolveErrorMessage(error, "认证失败"));
+      showError(error, authMode === "register" ? "注册失败" : "登录失败", "认证失败");
     } finally {
       setSubmittingAuth(false);
     }
@@ -490,7 +596,9 @@ export function App() {
 
   async function requestVerificationCode() {
     if (!emailInput.trim()) {
-      setStatus("请先输入邮箱");
+      const message = "请先输入邮箱";
+      setStatus(message);
+      pushNotice("error", "无法发送验证码", message);
       return;
     }
 
@@ -499,9 +607,11 @@ export function App() {
       const result = await sendVerificationCode({ email: emailInput.trim() });
       setVerificationCooldown(result.cooldown || 60);
       setStatus(result.emailDebug ? "验证码已生成，当前环境未启用邮件发送，请查看服务端日志" : result.message || "验证码已发送");
+      showInfo("验证码已发送", result.emailDebug ? "当前环境未启用邮件发送，请查看服务端日志" : result.message || "请检查你的邮箱收件箱");
     } catch (error) {
       console.error(error);
-      setStatus(error instanceof Error ? error.message : "验证码发送失败");
+      setStatus(resolveErrorMessage(error, "验证码发送失败"));
+      showError(error, "验证码发送失败", "请稍后重试");
     } finally {
       setSendingVerificationCode(false);
     }
@@ -532,7 +642,9 @@ export function App() {
   async function submitCreateDomain() {
     if (!session) return;
     if (!domainNameInput.trim()) {
-      setStatus("请输入域名称");
+      const message = "请输入域名称";
+      setStatus(message);
+      pushNotice("error", "创建域失败", message);
       return;
     }
     setSubmittingDomain(true);
@@ -546,9 +658,11 @@ export function App() {
       setDomainDescriptionInput("");
       await switchDomain(domain.id);
       setStatus("域创建成功");
+      showInfo("域创建成功", `已创建域 ${domain.name}`);
     } catch (error) {
       console.error(error);
-      setStatus(error instanceof Error ? error.message : "创建域失败");
+      setStatus(resolveErrorMessage(error, "创建域失败"));
+      showError(error, "创建域失败", "请稍后重试");
     } finally {
       setSubmittingDomain(false);
     }
@@ -567,7 +681,9 @@ export function App() {
   async function submitCreateChannel() {
     if (!session || !bootstrap || !channelComposerType) return;
     if (!channelNameInput.trim()) {
-      setStatus("请输入频道名称");
+      const message = "请输入频道名称";
+      setStatus(message);
+      pushNotice("error", "创建频道失败", message);
       return;
     }
     setSubmittingChannel(true);
@@ -590,9 +706,11 @@ export function App() {
       setChannelTopicInput("");
       await bootstrapData(channel.id, bootstrap.domain.id);
       setStatus(`${channelComposerType === "text" ? "文字" : "语音"}频道创建成功`);
+      showInfo("频道创建成功", `已创建${channelComposerType === "text" ? "文字" : "语音"}频道 ${channel.name}`);
     } catch (error) {
       console.error(error);
-      setStatus(error instanceof Error ? error.message : "创建频道失败");
+      setStatus(resolveErrorMessage(error, "创建频道失败"));
+      showError(error, "创建频道失败", "请稍后重试");
     } finally {
       setSubmittingChannel(false);
     }
@@ -648,6 +766,7 @@ export function App() {
     } catch (error) {
       console.error(error);
       setStatus("切换频道失败");
+      showError(error, "切换频道失败", "请稍后重试");
     }
   }
 
@@ -703,7 +822,8 @@ export function App() {
     } catch (error) {
       console.error(error);
       voiceLog("join:error", { traceId, error: error instanceof Error ? error.message : String(error) });
-      setStatus("麦克风权限失败");
+      setStatus(resolveErrorMessage(error, "麦克风权限失败"));
+      showError(error, "加入语音房失败", "无法获取麦克风权限或建立实时连接");
     }
   }
 
@@ -791,6 +911,7 @@ export function App() {
     } catch (error) {
       console.error(error);
       setStatus("切换麦克风失败");
+      showError(error, "切换麦克风失败", "请检查设备权限或重新选择设备");
     }
   }
 
@@ -803,6 +924,7 @@ export function App() {
     } catch (error) {
       console.error(error);
       setStatus("更新降噪配置失败");
+      showError(error, "更新降噪配置失败", "请稍后重试");
     }
   }
 
@@ -833,6 +955,7 @@ export function App() {
       })
       .catch((error) => {
         console.error(error);
+        showError(error, "预热麦克风失败", "无法预热当前麦克风设备");
       })
       .finally(() => {
         setAudioPrewarming(false);
@@ -883,6 +1006,7 @@ export function App() {
     } catch (error) {
       console.error(error);
       setStatus("屏幕共享失败");
+      showError(error, "屏幕共享失败", "请检查浏览器权限或重新选择共享窗口");
     }
   }
 
@@ -1032,6 +1156,7 @@ export function App() {
         break;
       case "error":
         setStatus(String(payload.message || "实时事件出错"));
+        pushNotice("error", "实时事件出错", String(payload.message || "实时事件出错"));
         break;
       default:
         break;
@@ -1201,7 +1326,7 @@ export function App() {
                 onMouseLeave={scheduleCloseHeadphoneSettings}
               >
                 <button
-                  className={`sidebar-icon-button ${deafened ? "sidebar-icon-button--active" : ""}`}
+                  className={`sidebar-icon-button ${deafened ? "sidebar-icon-button--danger" : ""}`}
                   title={deafened ? "关闭耳机静听" : "开启耳机静听"}
                   aria-label={deafened ? "关闭耳机静听" : "开启耳机静听"}
                   onClick={() => void toggleDeafen()}
@@ -1605,8 +1730,8 @@ export function App() {
         <div className="identity-modal identity-modal--visible">
           <div className="identity-modal__card">
             <div className="eyebrow">ACCOUNT ACCESS</div>
-            <h2>先注册或登录账号，再测试不同用户之间的通信。</h2>
-            <p>你可以开两个浏览器窗口，用两个账号同时进入同一个频道做消息与 WebRTC 联调。</p>
+            <h2>开源版 Oopz</h2>
+            <p>by.玺朽</p>
 
             <div className="toggle-row">
               <button className="action-pill" onClick={() => setAuthMode("register")}>
@@ -1694,6 +1819,32 @@ export function App() {
       ) : null}
 
       {maximizedScreen ? <ScreenPreviewModal screen={maximizedScreen} onClose={() => setMaximizedScreenKey(null)} /> : null}
+      <NoticeViewport notices={notices} onDismiss={dismissNotice} />
+    </div>
+  );
+}
+
+function NoticeViewport({
+  notices,
+  onDismiss,
+}: {
+  notices: Notice[];
+  onDismiss: (id: number) => void;
+}) {
+  if (!notices.length) return null;
+  return (
+    <div className="notice-viewport" role="status" aria-live="polite">
+      {notices.map((notice) => (
+        <div key={notice.id} className={`notice-card notice-card--${notice.kind}`}>
+          <div className="notice-card__body">
+            <strong>{notice.title}</strong>
+            <p>{notice.message}</p>
+          </div>
+          <button className="notice-card__close" onClick={() => onDismiss(notice.id)} aria-label="关闭提示">
+            ×
+          </button>
+        </div>
+      ))}
     </div>
   );
 }
@@ -1734,15 +1885,18 @@ function MemberSection({
                 {initials(member.displayName)}
               </div>
               <div className="member-row__content">
-                <strong>{member.displayName}</strong>
+                <strong>
+                  {member.displayName}
+                  {member.role === "owner" ? <span className="member-role-badge">域主</span> : null}
+                </strong>
                 <span>
                   {presence
-                    ? `${presence.micEnabled ? "Mic On" : "Muted"} · ${presence.screenSharing ? "Sharing" : "No Share"}`
+                    ? `${online?.domainId ? `域 ${online.domainId}` : "当前域"} · 正在 ${channelNameById.get(presence.channelId) || "语音频道"}`
                     : online
                       ? online.currentChannelId
-                        ? `在线 · 正在 ${channelNameById.get(online.currentChannelId) || "语音频道"}`
-                        : "在线"
-                      : member.email || member.role}
+                        ? `域 ${online.domainId} · 正在 ${channelNameById.get(online.currentChannelId) || "语音频道"}`
+                        : `域 ${online.domainId} · 在线`
+                      : "离线"}
                 </span>
               </div>
             </div>
@@ -2141,8 +2295,8 @@ function ChatIcon() {
 function SearchIcon() {
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true">
-      <circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" strokeWidth="1.8" />
-      <path d="m16 16 4 4" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+      <circle cx="11" cy="11" r="5.6" fill="none" stroke="currentColor" strokeWidth="1.65" />
+      <path d="m15.2 15.2 3.8 3.8" fill="none" stroke="currentColor" strokeWidth="1.65" strokeLinecap="round" />
     </svg>
   );
 }

@@ -181,6 +181,19 @@ export class RTCController {
     }
   }
 
+  primePrewarmedAudio(stream: MediaStream) {
+    if (this.localAudioStream === stream || this.prewarmedAudioStream === stream) {
+      this.clearPrewarmReleaseTimer();
+      return;
+    }
+    if (this.prewarmedAudioStream && this.prewarmedAudioStream !== stream) {
+      this.stopTrackGroup(this.prewarmedAudioStream);
+    }
+    this.prewarmedAudioStream = stream;
+    this.clearPrewarmReleaseTimer();
+    this.schedulePrewarmRelease();
+  }
+
   async startScreenShare() {
     if (this.localScreenStream) return;
     this.localScreenStream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
