@@ -59,6 +59,7 @@ jobs:
           script: |
             mkdir -p "${{ secrets.SERVER_DEPLOY_PATH }}/release"
             mkdir -p "${{ secrets.SERVER_DEPLOY_PATH }}/frontend"
+            mkdir -p "${{ secrets.SERVER_DEPLOY_PATH }}/_incoming/${{ github.sha }}"
 
       - name: Upload backend binary and frontend dist
         uses: appleboy/scp-action@v0.1.7
@@ -69,11 +70,11 @@ jobs:
           key: ${{ secrets.SERVER_SSH_KEY }}
           passphrase: ${{ secrets.SERVER_SSH_PASSPHRASE }}
           source: "release/oopz-live-linux-amd64,frontend/dist"
-          target: ${{ secrets.SERVER_DEPLOY_PATH }}
+          target: ${{ secrets.SERVER_DEPLOY_PATH }}/_incoming/${{ github.sha }}
           overwrite: true
           strip_components: 0
 
-      - name: Restart oopz-live service
+      - name: Promote artifacts and restart oopz-live service
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.SERVER_HOST }}
@@ -82,7 +83,15 @@ jobs:
           key: ${{ secrets.SERVER_SSH_KEY }}
           passphrase: ${{ secrets.SERVER_SSH_PASSPHRASE }}
           script: |
-            chmod +x "${{ secrets.SERVER_DEPLOY_PATH }}/release/oopz-live-linux-amd64"
+            INCOMING="${{ secrets.SERVER_DEPLOY_PATH }}/_incoming/${{ github.sha }}"
+            LIVE="${{ secrets.SERVER_DEPLOY_PATH }}"
+            sudo systemctl stop oopz-live || true
+            mkdir -p "$LIVE/release" "$LIVE/frontend"
+            cp "$INCOMING/release/oopz-live-linux-amd64" "$LIVE/release/oopz-live-linux-amd64"
+            rm -rf "$LIVE/frontend/dist"
+            cp -R "$INCOMING/frontend/dist" "$LIVE/frontend/dist"
+            chmod +x "$LIVE/release/oopz-live-linux-amd64"
             sudo systemctl restart oopz-live
             sudo systemctl status oopz-live --no-pager
             curl -fsS http://127.0.0.1:18080/healthz
+            rm -rf "$INCOMING"
