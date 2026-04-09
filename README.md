@@ -215,6 +215,22 @@ https://你的局域网IP:8443
 - `EMAIL_USER`
 - `EMAIL_PASSWORD`
 - `EMAIL_FROM_NAME`
+- `WEBRTC_STUN_URLS`
+- `WEBRTC_TURN_URLS`
+- `WEBRTC_TURN_USERNAME`
+- `WEBRTC_TURN_CREDENTIAL`
+
+### WebRTC ICE 环境变量示例
+
+```bash
+# 多个地址使用逗号分隔
+WEBRTC_STUN_URLS=stun:stun.l.google.com:19302,stun:stun1.l.google.com:19302
+WEBRTC_TURN_URLS=turn:turn.example.com:3478,turn:turn.example.com:3478?transport=tcp
+WEBRTC_TURN_USERNAME=your-turn-username
+WEBRTC_TURN_CREDENTIAL=your-turn-password
+```
+
+生产环境请通过密钥系统或部署环境变量注入 TURN 凭据，避免把凭据写入代码仓库。
 
 ## 主要接口
 

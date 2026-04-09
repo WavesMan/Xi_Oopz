@@ -1,3 +1,4 @@
+// noinspection SqlNoDataSourceInspection
 package store
 
 import (
@@ -905,7 +906,8 @@ func (s *Store) GetMessage(messageID int64) (models.Message, error) {
 	return msg, nil
 }
 
-func (s *Store) BuildBootstrap(ctx context.Context, userID, domainID, channelID int64, onlineCounts map[string]int64) (models.BootstrapResponse, error) {
+// BuildBootstrap 聚合首屏所需数据，并附带由应用层注入的 ICE 配置。
+func (s *Store) BuildBootstrap(ctx context.Context, userID, domainID, channelID int64, onlineCounts map[string]int64, stunServers []map[string]any) (models.BootstrapResponse, error) {
 	user, err := s.GetUserByID(userID)
 	if err != nil {
 		return models.BootstrapResponse{}, err
@@ -966,17 +968,6 @@ func (s *Store) BuildBootstrap(ctx context.Context, userID, domainID, channelID 
 		OnlineCounts:  onlineCounts,
 		SelectedID:    activeChannel.ID,
 		ActiveChannel: activeChannel,
-		StunServers: []map[string]any{
-			{"urls": "stun:stun.l.google.com:19302"},
-			{"urls": "stun:stun1.l.google.com:19302"},
-			{
-				"urls": []string{
-					"turn:turn.xixiu.top:3478",
-					"turn:turn.xixiu.top:3478?transport=tcp",
-				},
-				"username":   "xixiu",
-				"credential": "123456",
-			},
-		},
+		StunServers:   stunServers,
 	}, nil
 }
