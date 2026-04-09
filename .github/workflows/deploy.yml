@@ -1,5 +1,8 @@
 name: Deploy Oopz
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 on:
   workflow_dispatch:
   push:
@@ -52,6 +55,7 @@ jobs:
           username: ${{ secrets.SERVER_USER }}
           port: ${{ secrets.SERVER_PORT }}
           key: ${{ secrets.SERVER_SSH_KEY }}
+          passphrase: ${{ secrets.SERVER_SSH_PASSPHRASE }}
           script: |
             mkdir -p "${{ secrets.SERVER_DEPLOY_PATH }}/release"
             mkdir -p "${{ secrets.SERVER_DEPLOY_PATH }}/frontend"
@@ -63,6 +67,7 @@ jobs:
           username: ${{ secrets.SERVER_USER }}
           port: ${{ secrets.SERVER_PORT }}
           key: ${{ secrets.SERVER_SSH_KEY }}
+          passphrase: ${{ secrets.SERVER_SSH_PASSPHRASE }}
           source: "release/oopz-live-linux-amd64,frontend/dist"
           target: ${{ secrets.SERVER_DEPLOY_PATH }}
           overwrite: true
@@ -75,6 +80,7 @@ jobs:
           username: ${{ secrets.SERVER_USER }}
           port: ${{ secrets.SERVER_PORT }}
           key: ${{ secrets.SERVER_SSH_KEY }}
+          passphrase: ${{ secrets.SERVER_SSH_PASSPHRASE }}
           script: |
             chmod +x "${{ secrets.SERVER_DEPLOY_PATH }}/release/oopz-live-linux-amd64"
             sudo systemctl restart oopz-live
