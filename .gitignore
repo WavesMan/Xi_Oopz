@@ -8,5 +8,5 @@ certs/
 frontend/node_modules/
 frontend/dist/
 .idea/
-release/oopz-live-linux-amd64
-release/oopz-live-linux-arm64
+release/
+*.tsbuildinfo

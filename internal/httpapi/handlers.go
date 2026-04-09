@@ -29,15 +29,17 @@ import (
 )
 
 type Handler struct {
-	store *store.Store
-	hub   *realtime.Hub
-	auth  *auth.TokenManager
-	rdb   *redis.Client
-	mail  *notify.Mailer
+	store      *store.Store
+	hub        *realtime.Hub
+	auth       *auth.TokenManager
+	rdb        *redis.Client
+	mail       *notify.Mailer
+	iceServers []map[string]any
 }
 
-func NewHandler(s *store.Store, hub *realtime.Hub, authManager *auth.TokenManager, rdb *redis.Client, mailer *notify.Mailer) *Handler {
-	return &Handler{store: s, hub: hub, auth: authManager, rdb: rdb, mail: mailer}
+// NewHandler 创建 HTTP 处理器，并注入统一的 ICE 配置来源。
+func NewHandler(s *store.Store, hub *realtime.Hub, authManager *auth.TokenManager, rdb *redis.Client, mailer *notify.Mailer, iceServers []map[string]any) *Handler {
+	return &Handler{store: s, hub: hub, auth: authManager, rdb: rdb, mail: mailer, iceServers: iceServers}
 }
 
 func (h *Handler) Healthz(c *gin.Context) {
@@ -434,6 +436,7 @@ func (h *Handler) clearVerificationCode(ctx context.Context, email string) {
 	_ = h.rdb.Del(ctx, verificationCodeKey(email), verificationCooldownKey(email)).Err()
 }
 
+// Bootstrap 返回前端首屏所需聚合数据与 ICE 配置。
 func (h *Handler) Bootstrap(c *gin.Context) {
 	user, err := h.currentUser(c)
 	if err != nil {
@@ -475,7 +478,7 @@ func (h *Handler) Bootstrap(c *gin.Context) {
 		}
 	}
 
-	data, err := h.store.BuildBootstrap(c.Request.Context(), user.ID, domainID, channelID, h.hub.OnlineCounts(channelIDs))
+	data, err := h.store.BuildBootstrap(c.Request.Context(), user.ID, domainID, channelID, h.hub.OnlineCounts(channelIDs), h.iceServers)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return

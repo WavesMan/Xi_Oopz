@@ -108,7 +108,7 @@
 │   ├── realtime               # WebSocket Hub
 │   └── store                  # GORM + 数据访问
 ├── migrations                 # 初始化 SQL
-├── release                    # 预构建部署产物
+├── release                    # 部署目录（构建产物不入库）
 └── scripts                    # 启动与辅助脚本
 ```
 
@@ -159,52 +159,11 @@ go run ./cmd/server
 http://localhost:8080
 ```
 
-## 一键本地 HTTPS 调试
-
-为了在局域网多设备上测试 WebRTC 麦克风、屏幕共享和 `wss`，项目提供了本地 HTTPS 调试脚本。
-
-### 1. 准备证书
-
-推荐使用 `mkcert`：
-
-```bash
-mkcert -install
-mkcert localhost 127.0.0.1 192.168.1.100
-```
-
-### 2. 配置 `.env`
-
-```bash
-HTTPS_ENABLED=true
-PORT=8443
-TLS_CERT_FILE=/absolute/path/to/cert.pem
-TLS_KEY_FILE=/absolute/path/to/key.pem
-MYSQL_DSN=user:password@tcp(127.0.0.1:3306)/oopz?parseTime=true&multiStatements=true
-REDIS_ADDR=127.0.0.1:6379
-AUTH_SECRET=replace-with-your-secret
-```
-
-### 3. 启动
-
-```bash
-./scripts/run-local-https.sh
-```
-
-### 4. 访问
-
-```text
-https://localhost:8443
-https://你的局域网IP:8443
-```
-
 ## 环境变量
 
 常用环境变量如下：
 
 - `PORT`
-- `HTTPS_ENABLED`
-- `TLS_CERT_FILE`
-- `TLS_KEY_FILE`
 - `MYSQL_DSN`
 - `REDIS_ADDR`
 - `REDIS_PASSWORD`
@@ -215,6 +174,22 @@ https://你的局域网IP:8443
 - `EMAIL_USER`
 - `EMAIL_PASSWORD`
 - `EMAIL_FROM_NAME`
+- `WEBRTC_STUN_URLS`
+- `WEBRTC_TURN_URLS`
+- `WEBRTC_TURN_USERNAME`
+- `WEBRTC_TURN_CREDENTIAL`
+
+### WebRTC ICE 环境变量示例
+
+```bash
+# 多个地址使用逗号分隔
+WEBRTC_STUN_URLS=stun:stun.l.google.com:19302,stun:stun1.l.google.com:19302
+WEBRTC_TURN_URLS=turn:turn.xixiu.top:3478,turn:turn.xixiu.top:3478?transport=tcp
+WEBRTC_TURN_USERNAME=xixiu
+WEBRTC_TURN_CREDENTIAL=123456
+```
+
+生产环境请通过密钥系统或部署环境变量注入 TURN 凭据，避免把凭据写入代码仓库。
 
 ## 主要接口
 
@@ -269,10 +244,11 @@ https://你的局域网IP:8443
 
 ### 部署产物
 
-仓库已准备：
+仓库仅保留部署模板与源码，不再提交预构建二进制。  
+发布时请通过仓库外手工分发方式获取二进制，并放入部署目录：
 
-- Linux `amd64` 二进制：`release/oopz-live-linux-amd64`
-- Linux `arm64` 二进制：`release/oopz-live-linux-arm64`
+- Linux `amd64` 二进制：`release/oopz-live-linux-amd64`（手工分发）
+- Linux `arm64` 二进制：`release/oopz-live-linux-arm64`（手工分发）
 - Nginx 模板：`deploy/nginx/oopz.xixiu.top.conf`
 - systemd 模板：`deploy/systemd/oopz-live.service`
 
@@ -284,6 +260,11 @@ https://你的局域网IP:8443
 ├── release/oopz-live-linux-amd64
 └── .env
 ```
+
+### 仓库边界约定
+
+- 可跟踪：源码、配置模板、脚本、文档。
+- 不可跟踪：构建产物与本地发布二进制（如 `release/`、`frontend/dist/`、`*.tsbuildinfo`）。
 
 ### systemd
 

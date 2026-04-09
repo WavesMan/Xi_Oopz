@@ -9,8 +9,16 @@ import (
 	"oopz/internal/realtime"
 )
 
+// RegisterRoutes 注册 HTTP 与 WebSocket 路由。
 func RegisterRoutes(router *gin.Engine, application *App, hub *realtime.Hub) {
-	handler := httpapi.NewHandler(application.Store, hub, application.Auth, application.Redis, application.Mailer)
+	handler := httpapi.NewHandler(
+		application.Store,
+		hub,
+		application.Auth,
+		application.Redis,
+		application.Mailer,
+		application.Config.WebRTCIceServers(),
+	)
 
 	router.GET("/healthz", handler.Healthz)
 	router.GET("/api/domains", handler.ListDomains)
