@@ -25,19 +25,6 @@ type SignalPayload = {
 
 type MediaSyncKind = "audio" | "screen";
 
-const DEFAULT_ICE_SERVERS: RTCIceServer[] = [
-  { urls: "stun:stun.l.google.com:19302" },
-  { urls: "stun:stun1.l.google.com:19302" },
-  {
-    urls: [
-      "turn:turn.xixiu.top:3478",
-      "turn:turn.xixiu.top:3478?transport=tcp",
-    ],
-    username: "xixiu",
-    credential: "123456",
-  },
-];
-
 const RTC_DEBUG_LABELS = new Set([
   "joinVoice:start",
   "joinVoice:audio-ready",
@@ -518,6 +505,7 @@ export class RTCController {
     this.clearPrewarmReleaseTimer();
   }
 
+  // ensurePeer 确保与目标用户的 RTCPeerConnection 存在，并按需绑定本地轨道。
   private async ensurePeer(user: User, initialOfferOwner: boolean) {
     const existing = this.peers.get(user.id);
     if (existing) {
@@ -534,7 +522,7 @@ export class RTCController {
     }
 
     const pc = new RTCPeerConnection({
-      iceServers: this.getIceServers().length ? this.getIceServers() : DEFAULT_ICE_SERVERS,
+      iceServers: this.getIceServers(),
       bundlePolicy: "max-bundle",
       rtcpMuxPolicy: "require",
       iceTransportPolicy: "all",
