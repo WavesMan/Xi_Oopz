@@ -108,7 +108,7 @@
 │   ├── realtime               # WebSocket Hub
 │   └── store                  # GORM + 数据访问
 ├── migrations                 # 初始化 SQL
-├── release                    # 预构建部署产物
+├── release                    # 部署目录（构建产物不入库）
 └── scripts                    # 启动与辅助脚本
 ```
 
@@ -285,10 +285,11 @@ WEBRTC_TURN_CREDENTIAL=your-turn-password
 
 ### 部署产物
 
-仓库已准备：
+仓库仅保留部署模板与源码，不再提交预构建二进制。  
+发布时请通过仓库外手工分发方式获取二进制，并放入部署目录：
 
-- Linux `amd64` 二进制：`release/oopz-live-linux-amd64`
-- Linux `arm64` 二进制：`release/oopz-live-linux-arm64`
+- Linux `amd64` 二进制：`release/oopz-live-linux-amd64`（手工分发）
+- Linux `arm64` 二进制：`release/oopz-live-linux-arm64`（手工分发）
 - Nginx 模板：`deploy/nginx/oopz.xixiu.top.conf`
 - systemd 模板：`deploy/systemd/oopz-live.service`
 
@@ -300,6 +301,11 @@ WEBRTC_TURN_CREDENTIAL=your-turn-password
 ├── release/oopz-live-linux-amd64
 └── .env
 ```
+
+### 仓库边界约定
+
+- 可跟踪：源码、配置模板、脚本、文档。
+- 不可跟踪：构建产物与本地发布二进制（如 `release/`、`frontend/dist/`、`*.tsbuildinfo`）。
 
 ### systemd
 

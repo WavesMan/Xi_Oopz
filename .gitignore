@@ -8,3 +8,5 @@ certs/
 frontend/node_modules/
 frontend/dist/
 .idea/
+release/
+*.tsbuildinfo
