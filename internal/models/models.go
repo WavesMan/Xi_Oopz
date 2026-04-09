@@ -81,3 +81,39 @@ type AuthResponse struct {
 	Token string `json:"token"`
 	User  User   `json:"user"`
 }
+
+type ScreeningViewer struct {
+	User       User      `json:"user"`
+	Ready      bool      `json:"ready"`
+	JoinedAt   time.Time `json:"joinedAt"`
+	LastPingAt time.Time `json:"lastPingAt"`
+}
+
+type ScreeningPlaylistItem struct {
+	ItemID   string    `json:"itemId"`
+	URL      string    `json:"url"`
+	Title    string    `json:"title"`
+	AddedBy  int64     `json:"addedBy"`
+	AddedAt  time.Time `json:"addedAt"`
+}
+
+type ScreeningState struct {
+	ChannelID         int64     `json:"channelId"`
+	ControllerUserID  int64     `json:"controllerUserId"`
+	CurrentItemID     string    `json:"currentItemId"`
+	CurrentURL        string    `json:"currentUrl"`
+	CurrentTitle      string    `json:"currentTitle"`
+	PlaybackState     string    `json:"playbackState"`
+	CurrentTime       float64   `json:"currentTime"`
+	PlaybackRate      float64   `json:"playbackRate"`
+	UpdatedAt         time.Time `json:"updatedAt"`
+	StartedAt         time.Time `json:"startedAt"`
+	AwaitingReady     bool      `json:"awaitingReady"`
+	SyncToken         int64     `json:"syncToken"`
+}
+
+type ScreeningSnapshot struct {
+	State    ScreeningState          `json:"state"`
+	Viewers  []ScreeningViewer       `json:"viewers"`
+	Playlist []ScreeningPlaylistItem `json:"playlist"`
+}

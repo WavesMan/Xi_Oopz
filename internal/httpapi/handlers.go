@@ -4,12 +4,15 @@ import (
 	"context"
 	"crypto/rand"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"math/big"
 	"net/http"
 	"net/mail"
+	neturl "net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -228,6 +231,35 @@ func (h *Handler) SendVerificationCode(c *gin.Context) {
 	})
 }
 
+func (h *Handler) ResolveScreeningURL(c *gin.Context) {
+	if _, err := h.currentUser(c); err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
+		return
+	}
+
+	var req struct {
+		URL string `json:"url"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
+	}
+
+	resolvedURL, bvid, cid, page, err := resolveBilibiliDirectURL(c.Request.Context(), req.URL)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"source":      "bilibili",
+		"resolvedUrl": resolvedURL,
+		"bvid":        bvid,
+		"cid":         cid,
+		"page":        page,
+	})
+}
+
 func (h *Handler) Me(c *gin.Context) {
 	user, err := h.currentUser(c)
 	if err != nil {
@@ -260,6 +292,128 @@ func verificationCodeKey(email string) string {
 
 func verificationCooldownKey(email string) string {
 	return fmt.Sprintf("verification_code_cooldown:%s", email)
+}
+
+var bilibiliBVIDPattern = regexp.MustCompile(`BV[0-9A-Za-z]+`)
+
+func resolveBilibiliDirectURL(ctx context.Context, raw string) (resolvedURL string, bvid string, cid int64, page int, err error) {
+	parsed, err := neturl.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return "", "", 0, 0, errors.New("B 站视频地址格式无效")
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return "", "", 0, 0, errors.New("仅支持 http 或 https 视频地址")
+	}
+	host := strings.ToLower(parsed.Hostname())
+	if !strings.HasSuffix(host, "bilibili.com") {
+		return "", "", 0, 0, errors.New("当前仅支持解析哔哩哔哩视频地址")
+	}
+
+	bvid = bilibiliBVIDPattern.FindString(parsed.Path)
+	if bvid == "" {
+		bvid = strings.TrimSpace(parsed.Query().Get("bvid"))
+	}
+	if bvid == "" {
+		return "", "", 0, 0, errors.New("未能从链接中提取 BV 号")
+	}
+
+	page = 1
+	if rawPage := strings.TrimSpace(parsed.Query().Get("p")); rawPage != "" {
+		value, parseErr := strconv.Atoi(rawPage)
+		if parseErr != nil || value <= 0 {
+			return "", "", 0, 0, errors.New("视频分 P 参数无效")
+		}
+		page = value
+	}
+
+	client := &http.Client{Timeout: 10 * time.Second}
+
+	var pageList struct {
+		Code    int    `json:"code"`
+		Message string `json:"message"`
+		Data    []struct {
+			CID int64 `json:"cid"`
+		} `json:"data"`
+	}
+	pageListURL := fmt.Sprintf("https://api.bilibili.com/x/player/pagelist?bvid=%s", neturl.QueryEscape(bvid))
+	if err := fetchJSON(ctx, client, pageListURL, &pageList); err != nil {
+		return "", "", 0, 0, err
+	}
+	if pageList.Code != 0 {
+		return "", "", 0, 0, fmt.Errorf("B 站分页接口返回错误: %s", strings.TrimSpace(pageList.Message))
+	}
+	if len(pageList.Data) < page {
+		return "", "", 0, 0, errors.New("未找到对应分 P 的视频信息")
+	}
+	cid = pageList.Data[page-1].CID
+	if cid == 0 {
+		return "", "", 0, 0, errors.New("未获取到视频 CID")
+	}
+
+	var playURL struct {
+		Code    int    `json:"code"`
+		Message string `json:"message"`
+		Data    struct {
+			DURL []struct {
+				URL string `json:"url"`
+			} `json:"durl"`
+			Dash struct {
+				Video []struct {
+					BaseURL string `json:"baseUrl"`
+					BaseAlt string `json:"base_url"`
+				} `json:"video"`
+			} `json:"dash"`
+		} `json:"data"`
+	}
+	playURLRequest := fmt.Sprintf(
+		"https://api.bilibili.com/x/player/playurl?bvid=%s&cid=%d&qn=116&type=&otype=json&platform=html5&high_quality=1",
+		neturl.QueryEscape(bvid),
+		cid,
+	)
+	if err := fetchJSON(ctx, client, playURLRequest, &playURL); err != nil {
+		return "", "", 0, 0, err
+	}
+	if playURL.Code != 0 {
+		return "", "", 0, 0, fmt.Errorf("B 站播放地址接口返回错误: %s", strings.TrimSpace(playURL.Message))
+	}
+	if len(playURL.Data.DURL) > 0 && strings.TrimSpace(playURL.Data.DURL[0].URL) != "" {
+		return strings.TrimSpace(playURL.Data.DURL[0].URL), bvid, cid, page, nil
+	}
+	if len(playURL.Data.Dash.Video) > 0 {
+		for _, item := range playURL.Data.Dash.Video {
+			if strings.TrimSpace(item.BaseURL) != "" {
+				return strings.TrimSpace(item.BaseURL), bvid, cid, page, nil
+			}
+			if strings.TrimSpace(item.BaseAlt) != "" {
+				return strings.TrimSpace(item.BaseAlt), bvid, cid, page, nil
+			}
+		}
+	}
+
+	return "", "", 0, 0, errors.New("B 站接口未返回可播放直链")
+}
+
+func fetchJSON(ctx context.Context, client *http.Client, endpoint string, target any) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Referer", "https://www.bilibili.com/")
+	req.Header.Set("User-Agent", "oopz-live/1.0")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return errors.New("请求 B 站解析接口失败")
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("B 站解析接口请求失败: HTTP %d", resp.StatusCode)
+	}
+	if err := json.NewDecoder(resp.Body).Decode(target); err != nil {
+		return errors.New("B 站解析接口返回了无效数据")
+	}
+	return nil
 }
 
 func (h *Handler) readVerificationCode(ctx context.Context, email string) (string, error) {
@@ -553,14 +707,19 @@ func (h *Handler) DomainPresence(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	channelIDs := make([]int64, 0, len(channels))
+	voiceChannelIDs := make([]int64, 0, len(channels))
+	screeningChannelIDs := make([]int64, 0, len(channels))
 	for _, channel := range channels {
 		if channel.Type == "voice" {
-			channelIDs = append(channelIDs, channel.ID)
+			voiceChannelIDs = append(voiceChannelIDs, channel.ID)
+			continue
+		}
+		if channel.Type == "screening" {
+			screeningChannelIDs = append(screeningChannelIDs, channel.ID)
 		}
 	}
 
-	c.JSON(http.StatusOK, h.hub.DomainPresence(domainID, channelIDs))
+	c.JSON(http.StatusOK, h.hub.DomainPresence(domainID, voiceChannelIDs, screeningChannelIDs))
 }
 
 func (h *Handler) CreateCategory(c *gin.Context) {

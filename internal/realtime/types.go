@@ -28,9 +28,10 @@ type OnlineUserPresence struct {
 }
 
 type DomainPresenceSnapshot struct {
-	OnlineUsers  []OnlineUserPresence      `json:"onlineUsers"`
-	VoiceMembers map[string][]PresenceMember `json:"voiceMembers"`
-	OnlineCounts map[string]int64          `json:"onlineCounts"`
+	OnlineUsers      []OnlineUserPresence         `json:"onlineUsers"`
+	VoiceMembers     map[string][]PresenceMember  `json:"voiceMembers"`
+	ScreeningMembers map[string][]models.ScreeningViewer `json:"screeningMembers"`
+	OnlineCounts     map[string]int64             `json:"onlineCounts"`
 }
 
 type ChannelJoinPayload struct {
@@ -62,4 +63,31 @@ type RTCSignalPayload struct {
 	SourceUserID int64  `json:"sourceUserId"`
 	SDP          string `json:"sdp,omitempty"`
 	Candidate    string `json:"candidate,omitempty"`
+}
+
+type ScreeningJoinPayload struct {
+	ChannelID int64 `json:"channelId"`
+}
+
+type ScreeningLeavePayload struct {
+	ChannelID int64 `json:"channelId"`
+}
+
+type ScreeningReplacePayload struct {
+	ChannelID int64  `json:"channelId"`
+	URL       string `json:"url"`
+	Title     string `json:"title"`
+}
+
+type ScreeningAddPayload struct {
+	ChannelID int64  `json:"channelId"`
+	URL       string `json:"url"`
+	Title     string `json:"title"`
+}
+
+type ScreeningPlaybackPayload struct {
+	ChannelID    int64   `json:"channelId"`
+	ItemID       string  `json:"itemId"`
+	CurrentTime  float64 `json:"currentTime"`
+	PlaybackRate float64 `json:"playbackRate"`
 }

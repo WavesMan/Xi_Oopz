@@ -1,7 +1,7 @@
 import { startTransition, useDeferredValue, useEffect, useRef, useState } from "react";
 
-import { createCategory, createChannel, createDomain, fetchBootstrap, fetchChannelMessages, fetchDomainPresence, fetchMe, loginAccount, registerAccount, sendVerificationCode } from "./api";
-import { RTCController } from "./rtc";
+import { createCategory, createChannel, createDomain, fetchBootstrap, fetchChannelMessages, fetchDomainPresence, fetchMe, loginAccount, registerAccount, resolveScreeningUrl, sendVerificationCode } from "./api";
+import { RTCController, type ScreenAudioMode, type ScreenShareOptions, type ScreenShareSurface } from "./rtc";
 import { soundManager } from "./sound";
 import { SocketClient } from "./socket";
 import type {
@@ -13,6 +13,9 @@ import type {
   OnlineUserPresence,
   PresenceMember,
   RemoteMedia,
+  ScreeningPlaylistItem,
+  ScreeningSnapshot,
+  ScreeningState,
   User,
 } from "./types";
 
@@ -39,6 +42,23 @@ type Notice = {
   message: string;
 };
 
+type ScreenSharePreset = {
+  surface: ScreenShareSurface;
+  audioMode: ScreenAudioMode;
+};
+
+type ScreeningPlayerElement = HTMLElement & {
+  src?: string;
+  currentTime: number;
+  duration?: number;
+  playbackRate: number;
+  volume?: number;
+  paused: boolean;
+  play: () => Promise<void>;
+  pause: () => Promise<void>;
+  enterFullscreen?: (target?: string) => Promise<void>;
+};
+
 const VOICE_UI_DEBUG_LABELS = new Set([
   "join:start",
   "join:audio-device-applied",
@@ -49,6 +69,13 @@ const VOICE_UI_DEBUG_LABELS = new Set([
   "leave:start",
   "leave:rtc.leaveVoice-returned",
   "leave:local-state-cleared",
+]);
+
+const SCREENING_DEBUG_LABELS = new Set([
+  "screening:join:send",
+  "screening:snapshot:received",
+  "screening:controller:changed",
+  "screening:player:src-assigned",
 ]);
 
 const EMOJI_GROUPS: Array<{ label: string; items: string[] }> = [
@@ -77,7 +104,35 @@ function initials(name?: string) {
 
 function formatTime(value: string) {
   const date = new Date(value);
-  return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+  const now = new Date();
+  const timeText = `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const startOfTarget = new Date(date.getFullYear(), date.getMonth(), date.getDate());
+  const diffDays = Math.round((startOfToday.getTime() - startOfTarget.getTime()) / 86400000);
+
+  if (diffDays === 0) {
+    return timeText;
+  }
+  if (diffDays === 1) {
+    return `昨天 ${timeText}`;
+  }
+  if (diffDays === 2) {
+    return `前天 ${timeText}`;
+  }
+
+  const currentWeekday = (startOfToday.getDay() + 6) % 7;
+  const startOfWeek = new Date(startOfToday);
+  startOfWeek.setDate(startOfToday.getDate() - currentWeekday);
+  if (startOfTarget >= startOfWeek && diffDays > 2) {
+    const weekdayText = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"][(date.getDay() + 6) % 7];
+    return `${weekdayText} ${timeText}`;
+  }
+
+  if (date.getFullYear() === now.getFullYear()) {
+    return `${date.getMonth() + 1}月 ${date.getDate()}日 ${timeText}`;
+  }
+
+  return `${date.getFullYear()}年 ${date.getMonth() + 1}月 ${date.getDate()}日 ${timeText}`;
 }
 
 function escapeHTML(value: string) {
@@ -128,6 +183,11 @@ export function App() {
   const [noiseSuppressionEnabled, setNoiseSuppressionEnabled] = useState(true);
   const [remoteVolume, setRemoteVolume] = useState(72);
   const [screenSharing, setScreenSharing] = useState(false);
+  const [showScreenShareSheet, setShowScreenShareSheet] = useState(false);
+  const [screenSharePreset, setScreenSharePreset] = useState<ScreenSharePreset>({
+    surface: "tab",
+    audioMode: "share",
+  });
   const [messageDraft, setMessageDraft] = useState("");
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
   const [localAudioStream, setLocalAudioStream] = useState<MediaStream | null>(null);
@@ -139,12 +199,17 @@ export function App() {
   const [creatingDomain, setCreatingDomain] = useState(false);
   const [domainNameInput, setDomainNameInput] = useState("");
   const [domainDescriptionInput, setDomainDescriptionInput] = useState("");
-  const [channelComposerType, setChannelComposerType] = useState<"text" | "voice" | null>(null);
+  const [channelComposerType, setChannelComposerType] = useState<"text" | "voice" | "screening" | null>(null);
   const [channelNameInput, setChannelNameInput] = useState("");
   const [channelTopicInput, setChannelTopicInput] = useState("");
   const [submittingDomain, setSubmittingDomain] = useState(false);
   const [submittingChannel, setSubmittingChannel] = useState(false);
   const [voiceTargetChannelId, setVoiceTargetChannelId] = useState<number | null>(null);
+  const [screeningSnapshot, setScreeningSnapshot] = useState<ScreeningSnapshot | null>(null);
+  const [screeningChannelMembers, setScreeningChannelMembers] = useState<Record<string, User[]>>({});
+  const [screeningUrlInput, setScreeningUrlInput] = useState("");
+  const [screeningTitleInput, setScreeningTitleInput] = useState("");
+  const [screeningJoinEpoch, setScreeningJoinEpoch] = useState(0);
 
   const socketRef = useRef<SocketClient | null>(null);
   const rtcRef = useRef<RTCController | null>(null);
@@ -159,6 +224,7 @@ export function App() {
   const leaveTraceRef = useRef<{ id: number; startedAt: number; channelId: number | null } | null>(null);
   const voiceTraceCounterRef = useRef(0);
   const activeChannelIdRef = useRef<number | null>(null);
+  const activeChannelRef = useRef<Channel | null>(null);
   const currentVoiceChannelIdRef = useRef<number | null>(null);
   const voiceMembersRef = useRef<Map<number, PresenceMember>>(new Map());
   const membersRef = useRef<DomainMember[]>([]);
@@ -167,6 +233,9 @@ export function App() {
   const startupAudioStreamRef = useRef<MediaStream | null>(null);
   const noticeIdRef = useRef(0);
   const noticeTimersRef = useRef(new Map<number, number>());
+  const voiceJoinInFlightRef = useRef<number | null>(null);
+  const voiceLeaveInFlightRef = useRef(false);
+  const screeningJoinDedupRef = useRef<{ channelId: number | null; until: number }>({ channelId: null, until: 0 });
   const audioSetupPending = audioDevicesLoading || audioPrewarming;
 
   useEffect(() => {
@@ -176,6 +245,7 @@ export function App() {
 
   useEffect(() => {
     activeChannelIdRef.current = activeChannel?.id || null;
+    activeChannelRef.current = activeChannel;
   }, [activeChannel]);
 
   useEffect(() => {
@@ -437,6 +507,18 @@ export function App() {
     console.info(`[voice-ui][${stamp}] ${label}`);
   }
 
+  function screeningLog(label: string, extra?: Record<string, unknown>) {
+    if (!SCREENING_DEBUG_LABELS.has(label)) {
+      return;
+    }
+    const stamp = new Date().toISOString();
+    if (extra) {
+      console.info(`[screening-ui][${stamp}] ${label}`, extra);
+      return;
+    }
+    console.info(`[screening-ui][${stamp}] ${label}`);
+  }
+
   useEffect(() => {
     if (!session || !user || !bootstrap?.domain.id) return;
 
@@ -494,13 +576,16 @@ export function App() {
       const channels = (data.categories || []).flatMap((category) => category.channels);
       const firstTextChannel = channels.find((channel) => channel.type === "text") || null;
       const firstVoiceChannel = channels.find((channel) => channel.type === "voice") || null;
-      const preferredTextChannel = data.activeChannel?.type === "text" ? data.activeChannel : firstTextChannel || data.activeChannel;
+      const preferredActiveChannel = data.activeChannel || firstTextChannel || channels[0] || null;
       setBootstrap(data);
       setUser(data.user);
-      setActiveChannel(preferredTextChannel);
+      setActiveChannel(preferredActiveChannel);
       setMessages(data.messages);
       setVoiceTargetChannelId(firstVoiceChannel?.id || null);
       setOnlineCounts(data.onlineCounts || {});
+      if (preferredActiveChannel?.type !== "screening") {
+        setScreeningSnapshot(null);
+      }
       setStatus("页面已就绪");
     } catch (error) {
       console.error(error);
@@ -521,6 +606,14 @@ export function App() {
         if (cancelled) return;
         setOnlineCounts(snapshot.onlineCounts || {});
         setVoiceChannelMembers(snapshot.voiceMembers || {});
+        setScreeningChannelMembers(
+          Object.fromEntries(
+            Object.entries(snapshot.screeningMembers || {}).map(([channelId, viewers]) => [
+              channelId,
+              (viewers || []).map((viewer) => viewer.user),
+            ]),
+          ),
+        );
         setOnlineUsers(new Map((snapshot.onlineUsers || []).map((item) => [item.user.id, item])));
       } catch (error) {
         if (!cancelled) {
@@ -668,12 +761,16 @@ export function App() {
     }
   }
 
-  function resolveCategoryForType(type: "text" | "voice") {
+  function resolveCategoryForType(type: "text" | "voice" | "screening") {
     const categories = bootstrap?.categories || [];
     const matchByChannel = categories.find((category) => category.channels.some((channel) => channel.type === type));
     if (matchByChannel) return matchByChannel;
     const matchByName = categories.find((category) =>
-      type === "text" ? /text/i.test(category.name) || /文字/.test(category.name) : /voice/i.test(category.name) || /语音/.test(category.name),
+      type === "text"
+        ? /text/i.test(category.name) || /文字/.test(category.name)
+        : type === "voice"
+          ? /voice/i.test(category.name) || /语音/.test(category.name)
+          : /screen/i.test(category.name) || /放映|观影|screening/i.test(category.name),
     );
     return matchByName || null;
   }
@@ -691,22 +788,36 @@ export function App() {
       let category = resolveCategoryForType(channelComposerType);
       if (!category) {
         category = await createCategory(bootstrap.domain.id, session.token, {
-          name: channelComposerType === "text" ? "TEXT CHANNELS" : "VOICE CHANNELS",
+          name:
+            channelComposerType === "text"
+              ? "TEXT CHANNELS"
+              : channelComposerType === "voice"
+                ? "VOICE CHANNELS"
+                : "SCREENING ROOMS",
         });
       }
       const channel = await createChannel(bootstrap.domain.id, session.token, {
         categoryId: category.id,
         name: channelNameInput.trim(),
         type: channelComposerType,
-        topic: channelTopicInput.trim() || (channelComposerType === "text" ? "新的文字频道。" : "新的语音频道。"),
-        maxMembers: channelComposerType === "voice" ? 16 : 0,
+        topic:
+          channelTopicInput.trim() ||
+          (channelComposerType === "text"
+            ? "新的文字频道。"
+            : channelComposerType === "voice"
+              ? "新的语音频道。"
+              : "新的放映室，可同步播放直链视频。"),
+        maxMembers: channelComposerType === "voice" ? 16 : channelComposerType === "screening" ? 24 : 0,
       });
       setChannelComposerType(null);
       setChannelNameInput("");
       setChannelTopicInput("");
       await bootstrapData(channel.id, bootstrap.domain.id);
-      setStatus(`${channelComposerType === "text" ? "文字" : "语音"}频道创建成功`);
-      showInfo("频道创建成功", `已创建${channelComposerType === "text" ? "文字" : "语音"}频道 ${channel.name}`);
+      setStatus(`${channelComposerType === "text" ? "文字" : channelComposerType === "voice" ? "语音" : "放映室"}频道创建成功`);
+      showInfo(
+        "频道创建成功",
+        `已创建${channelComposerType === "text" ? "文字" : channelComposerType === "voice" ? "语音" : "放映室"}频道 ${channel.name}`,
+      );
     } catch (error) {
       console.error(error);
       setStatus(resolveErrorMessage(error, "创建频道失败"));
@@ -748,21 +859,59 @@ export function App() {
     setSubmittingDomain(false);
     setSubmittingChannel(false);
     setVoiceTargetChannelId(null);
+    setScreeningSnapshot(null);
+    setScreeningChannelMembers({});
+    setScreeningUrlInput("");
+    setScreeningTitleInput("");
   }
 
   async function selectChannel(channel: Channel) {
     if (!bootstrap || !session) return;
+    if (activeChannel?.type === "screening" && activeChannel.id !== channel.id) {
+      await leaveScreeningChannel(channel.type === "voice" ? firstTextChannel : null);
+    }
     if (channel.type === "voice") {
       setVoiceTargetChannelId(channel.id);
+      if (activeChannel?.type === "screening" && firstTextChannel) {
+        setActiveChannel(firstTextChannel);
+      }
+      if (currentVoiceChannelId && currentVoiceChannelId !== channel.id) {
+        await leaveVoice();
+      }
       setStatus(`已选中语音频道 ${channel.name}，双击进入`);
       return;
     }
     try {
+      if (channel.type === "screening" && currentVoiceChannelId && currentVoiceChannelId !== channel.id) {
+        await leaveVoice();
+      }
       const nextMessages = await fetchChannelMessages(bootstrap.domain.id, channel.id, session.token);
       startTransition(() => {
         setActiveChannel(channel);
         setMessages(nextMessages);
       });
+      if (channel.type === "screening") {
+        const now = Date.now();
+        if (screeningJoinDedupRef.current.channelId === channel.id && screeningJoinDedupRef.current.until > now) {
+          return;
+        }
+        screeningJoinDedupRef.current = { channelId: channel.id, until: now + 900 };
+        if (screenSharing) {
+          await rtcRef.current?.stopScreenShare(false);
+          setScreenSharing(false);
+        }
+        screeningLog("screening:join:send", { channelId: channel.id, reason: "select-channel" });
+        setScreeningJoinEpoch((value) => value + 1);
+        socketRef.current?.send("screening.join", { channelId: channel.id });
+        if (currentVoiceChannelId !== channel.id) {
+          await joinVoice(channel.id);
+        } else {
+          setVoiceTargetChannelId(channel.id);
+        }
+        setStatus(`已进入放映室 ${channel.name}`);
+      } else {
+        setScreeningSnapshot(null);
+      }
     } catch (error) {
       console.error(error);
       setStatus("切换频道失败");
@@ -773,6 +922,10 @@ export function App() {
   async function joinVoice(channelId?: number) {
     const targetId = channelId || voiceTargetChannelId;
     if (!targetId) return;
+    if (voiceJoinInFlightRef.current === targetId) {
+      return;
+    }
+    voiceJoinInFlightRef.current = targetId;
     const effectiveAudioInputId = pickPreferredAudioInputId(audioInputs, selectedAudioInputId);
     const traceId = voiceTraceCounterRef.current + 1;
     voiceTraceCounterRef.current = traceId;
@@ -824,11 +977,18 @@ export function App() {
       voiceLog("join:error", { traceId, error: error instanceof Error ? error.message : String(error) });
       setStatus(resolveErrorMessage(error, "麦克风权限失败"));
       showError(error, "加入语音房失败", "无法获取麦克风权限或建立实时连接");
+    } finally {
+      if (voiceJoinInFlightRef.current === targetId) {
+        voiceJoinInFlightRef.current = null;
+      }
     }
   }
 
   async function enterVoiceChannel(channel: Channel) {
     if (channel.type !== "voice") return;
+    if (activeChannel?.type === "screening") {
+      await leaveScreeningChannel(firstTextChannel);
+    }
     setVoiceTargetChannelId(channel.id);
     if (currentVoiceChannelId === channel.id) {
       setStatus(`已在 ${channel.name} 中`);
@@ -838,6 +998,10 @@ export function App() {
   }
 
   async function leaveVoice() {
+    if (voiceLeaveInFlightRef.current) {
+      return;
+    }
+    voiceLeaveInFlightRef.current = true;
     const traceId = voiceTraceCounterRef.current + 1;
     voiceTraceCounterRef.current = traceId;
     leaveTraceRef.current = {
@@ -845,30 +1009,58 @@ export function App() {
       startedAt: performance.now(),
       channelId: currentVoiceChannelId,
     };
-    voiceLog("leave:start", { traceId, channelId: currentVoiceChannelId });
-    await rtcRef.current?.leaveVoice();
-    if (leaveTraceRef.current) {
-      voiceLog("leave:rtc.leaveVoice-returned", {
-        traceId,
-        elapsedMs: Math.round(performance.now() - leaveTraceRef.current.startedAt),
-      });
+    try {
+      voiceLog("leave:start", { traceId, channelId: currentVoiceChannelId });
+      await rtcRef.current?.leaveVoice();
+      if (leaveTraceRef.current) {
+        voiceLog("leave:rtc.leaveVoice-returned", {
+          traceId,
+          elapsedMs: Math.round(performance.now() - leaveTraceRef.current.startedAt),
+        });
+      }
+      setCurrentVoiceChannelId(null);
+      setVoiceMembers(new Map());
+      setRemoteMedia(new Map());
+      setMicEnabled(true);
+      setDeafened(false);
+      setScreenSharing(false);
+      setLocalAudioStream(null);
+      setLocalScreenStream(null);
+      setMaximizedScreenKey(null);
+      if (leaveTraceRef.current) {
+        voiceLog("leave:local-state-cleared", {
+          traceId,
+          elapsedMs: Math.round(performance.now() - leaveTraceRef.current.startedAt),
+        });
+      }
+      setStatus("已离开语音房");
+    } finally {
+      voiceLeaveInFlightRef.current = false;
     }
-    setCurrentVoiceChannelId(null);
-    setVoiceMembers(new Map());
-    setRemoteMedia(new Map());
-    setMicEnabled(true);
-    setDeafened(false);
-    setScreenSharing(false);
-    setLocalAudioStream(null);
-    setLocalScreenStream(null);
-    setMaximizedScreenKey(null);
-    if (leaveTraceRef.current) {
-      voiceLog("leave:local-state-cleared", {
-        traceId,
-        elapsedMs: Math.round(performance.now() - leaveTraceRef.current.startedAt),
-      });
+  }
+
+  async function leaveScreeningChannel(nextActive: Channel | null) {
+    const leavingChannel = activeChannelRef.current?.type === "screening" ? activeChannelRef.current : null;
+    if (!leavingChannel) {
+      if (nextActive) {
+        setActiveChannel(nextActive);
+      }
+      return;
     }
-    setStatus("已离开语音房");
+    socketRef.current?.send("screening.leave", { channelId: leavingChannel.id });
+    screeningJoinDedupRef.current = { channelId: null, until: 0 };
+    setScreeningSnapshot(null);
+    setScreeningJoinEpoch((value) => value + 1);
+    setScreeningChannelMembers((prev) => {
+      const next = { ...prev };
+      delete next[String(leavingChannel.id)];
+      return next;
+    });
+    setActiveChannel(nextActive);
+    await Promise.resolve();
+    if (currentVoiceChannelIdRef.current) {
+      await leaveVoice();
+    }
   }
 
   async function toggleMic() {
@@ -991,10 +1183,16 @@ export function App() {
   }
 
   async function toggleScreenShare() {
+    if (currentVoiceChannel?.type === "screening") {
+      setStatus("放映室连麦不支持屏幕共享");
+      pushNotice("error", "无法共享屏幕", "放映室与语音频道互斥，且放映室连麦暂不支持屏幕共享。");
+      return;
+    }
     try {
       const next = !screenSharing;
       if (next) {
-        await rtcRef.current?.startScreenShare();
+        setShowScreenShareSheet(true);
+        return;
       } else {
         await rtcRef.current?.stopScreenShare(false);
       }
@@ -1002,6 +1200,33 @@ export function App() {
       socketRef.current?.send("screen.state", {
         channelId: currentVoiceChannelId,
         screenSharing: next,
+      });
+    } catch (error) {
+      console.error(error);
+      setStatus("屏幕共享失败");
+      showError(error, "屏幕共享失败", "请检查浏览器权限或重新选择共享窗口");
+    }
+  }
+
+  async function confirmScreenShare() {
+    try {
+      const options: ScreenShareOptions = {
+        surface: screenSharePreset.surface,
+        audioMode: screenSharePreset.audioMode,
+      };
+      await rtcRef.current?.startScreenShare(options);
+      setScreenSharing(true);
+      setShowScreenShareSheet(false);
+      if (options.surface === "screen" && options.audioMode === "share") {
+        pushNotice(
+          "info",
+          "正在共享系统音频",
+          "系统音频可能把远端通话声、通知声一起带出去，建议佩戴耳机；浏览器支持时会尝试启用 restrictOwnAudio 和 suppressLocalAudioPlayback 兜底。",
+        );
+      }
+      socketRef.current?.send("screen.state", {
+        channelId: currentVoiceChannelId,
+        screenSharing: true,
       });
     } catch (error) {
       console.error(error);
@@ -1046,9 +1271,15 @@ export function App() {
       case "ready":
         voiceLog("socket:ready", { domainId: payload.domainId, userId: payload.userId });
         setStatus("实时连接就绪");
-        if (currentVoiceChannelIdRef.current) {
+        if (currentVoiceChannelIdRef.current && voiceJoinInFlightRef.current !== currentVoiceChannelIdRef.current) {
           socketRef.current?.send("channel.join", {
             channelId: currentVoiceChannelIdRef.current,
+          });
+        }
+        if (activeChannelIdRef.current && activeChannelRef.current?.type === "screening") {
+          screeningLog("screening:join:send", { channelId: activeChannelIdRef.current, reason: "socket-ready" });
+          socketRef.current?.send("screening.join", {
+            channelId: activeChannelIdRef.current,
           });
         }
         break;
@@ -1147,6 +1378,55 @@ export function App() {
           rtcRef.current?.handleScreenState(payload.userId as number, Boolean(payload.screenSharing));
         }
         break;
+      case "screening.snapshot":
+        screeningLog("screening:snapshot:received", {
+          channelId: (payload as ScreeningSnapshot).state.channelId,
+          itemId: (payload as ScreeningSnapshot).state.currentItemId,
+          currentUrl: (payload as ScreeningSnapshot).state.currentUrl,
+          controllerUserId: (payload as ScreeningSnapshot).state.controllerUserId,
+        });
+        setScreeningSnapshot(payload as ScreeningSnapshot);
+        setScreeningChannelMembers((prev) => ({
+          ...prev,
+          [String((payload as ScreeningSnapshot).state.channelId)]: ((payload as ScreeningSnapshot).viewers || []).map((viewer) => viewer.user),
+        }));
+        break;
+      case "screening.playlist.updated":
+        setScreeningSnapshot((prev) =>
+          prev
+            ? {
+                ...prev,
+                playlist: (payload.playlist || []) as ScreeningPlaylistItem[],
+              }
+            : prev,
+        );
+        break;
+      case "screening.controller.changed": {
+        const nextName = String(payload.controllerName || "新的控制者");
+        const isSelf = Number(payload.controllerUserId) === currentUserRef.current?.id;
+        screeningLog("screening:controller:changed", {
+          controllerUserId: payload.controllerUserId,
+          controllerName: nextName,
+          isSelf,
+        });
+        setStatus(isSelf ? "你已接管放映室控制权" : `控制者已转让给 ${nextName}`);
+        pushNotice("info", "放映室控制权已转让", isSelf ? "你已成为新的控制者，将继续向房间同步播放状态。" : `新的控制者是 ${nextName}。`);
+        break;
+      }
+      case "screening.play":
+      case "screening.pause":
+      case "screening.seek":
+      case "screening.tick":
+      case "screening.rate":
+        setScreeningSnapshot((prev) =>
+          prev
+            ? {
+                ...prev,
+                state: payload as ScreeningState,
+              }
+            : prev,
+        );
+        break;
       case "screen.sync_request":
       case "media.sync_request":
       case "rtc.offer":
@@ -1171,7 +1451,13 @@ export function App() {
   const allChannels = categories.flatMap((category) => category.channels);
   const firstTextChannel = allChannels.find((channel) => channel.type === "text") || null;
   const currentVoiceChannel = allChannels.find((channel) => channel.id === currentVoiceChannelId) || null;
-  const chatChannel = activeChannel?.type === "text" ? activeChannel : firstTextChannel;
+  const chatChannel = activeChannel && activeChannel.type !== "voice" ? activeChannel : firstTextChannel;
+  const activeScreeningChannel = activeChannel?.type === "screening" ? activeChannel : null;
+  const onlineMemberIds = new Set(onlineUsers.keys());
+  const screeningViewerIds = new Set((screeningSnapshot?.viewers || []).map((viewer) => viewer.user.id));
+  const screeningViewerMembers = activeScreeningChannel ? (bootstrap?.members || []).filter((member) => screeningViewerIds.has(member.id)) : [];
+  const onlineMembers = (bootstrap?.members || []).filter((member) => onlineMemberIds.has(member.id) && !screeningViewerIds.has(member.id));
+  const offlineMembers = (bootstrap?.members || []).filter((member) => !onlineMemberIds.has(member.id));
   const screenPreviews: ScreenPreview[] = [];
   if (user && localScreenStream) {
     screenPreviews.push({
@@ -1207,7 +1493,6 @@ export function App() {
     }
     return left.user.displayName.localeCompare(right.user.displayName, "zh-CN");
   });
-  const onlineMemberIds = new Set(onlineUsers.keys());
   const channelNameById = new Map<number, string>();
   categories.forEach((category) => {
     category.channels.forEach((channel) => {
@@ -1442,6 +1727,9 @@ export function App() {
               <button className="action-pill" onClick={() => setChannelComposerType("voice")}>
                 + 语音频道
               </button>
+              <button className="action-pill" onClick={() => setChannelComposerType("screening")}>
+                + 放映室
+              </button>
             </div>
           ) : null}
         </div>
@@ -1466,7 +1754,7 @@ export function App() {
                         onClick={() => void selectChannel(channel)}
                         onDoubleClick={() => void enterVoiceChannel(channel)}
                       >
-                        <span>{channel.type === "voice" ? <VoiceChannelIcon /> : <HashIcon />}</span>
+                        <span>{channel.type === "voice" ? <VoiceChannelIcon /> : channel.type === "screening" ? <PlayIcon /> : <HashIcon />}</span>
                         <span className="channel-item__name">{channel.name}</span>
                         {channel.type === "voice" ? (
                           <span className="channel-item__meta">
@@ -1488,6 +1776,20 @@ export function App() {
                             <div className="channel-presence-more">+{(voiceChannelMembers[String(channel.id)] || []).length - 4}</div>
                           ) : null}
                         </div>
+                      ) : channel.type === "screening" && (screeningChannelMembers[String(channel.id)] || []).length ? (
+                        <div className="channel-presence-list">
+                          {(screeningChannelMembers[String(channel.id)] || []).slice(0, 4).map((member) => (
+                            <div key={member.id} className="channel-presence-pill">
+                              <div className="channel-presence-pill__avatar" style={{ background: member.avatarColor }}>
+                                {initials(member.displayName)}
+                              </div>
+                              <span>{member.displayName}</span>
+                            </div>
+                          ))}
+                          {(screeningChannelMembers[String(channel.id)] || []).length > 4 ? (
+                            <div className="channel-presence-more">+{(screeningChannelMembers[String(channel.id)] || []).length - 4}</div>
+                          ) : null}
+                        </div>
                       ) : null}
                     </div>
                   ))}
@@ -1497,7 +1799,7 @@ export function App() {
         </section>
       </aside>
 
-      <main className="main-panel">
+      <main className={`main-panel ${activeScreeningChannel ? "main-panel--screening" : ""}`}>
         <RemoteAudioLayer remoteMedia={remoteMedia} selfUserId={user?.id || 0} deafened={deafened} remoteVolume={remoteVolume} />
         <div className="top-utility-bar">
           <div className="top-utility-bar__left">
@@ -1523,7 +1825,7 @@ export function App() {
           </div>
         </div>
 
-        {currentVoiceChannel ? (
+        {currentVoiceChannel && !activeScreeningChannel ? (
           <section className="voice-presence-dock">
             <div className="voice-presence-dock__title">
               <div>
@@ -1577,29 +1879,76 @@ export function App() {
           </section>
         ) : null}
 
-        <section className="chat-panel">
-          <div className="chat-panel__toolbar">
-            <div className="chat-panel__title">
-              <div className="chat-panel__title-icon">
-                {chatChannel?.type === "text" ? <HomeIcon /> : <HashIcon />}
+        {activeScreeningChannel ? (
+          <ScreeningRoomPanel
+            key={`${activeScreeningChannel.id}-${screeningJoinEpoch}`}
+            channel={activeScreeningChannel}
+            snapshot={screeningSnapshot}
+            currentUser={user}
+            authToken={session?.token || null}
+            joinEpoch={screeningJoinEpoch}
+            urlInput={screeningUrlInput}
+            titleInput={screeningTitleInput}
+            onUrlInputChange={setScreeningUrlInput}
+            onTitleInputChange={setScreeningTitleInput}
+            onReplace={({ url, title }) =>
+              (() => {
+                socketRef.current?.send("screening.url.replace", {
+                  channelId: activeScreeningChannel.id,
+                  url,
+                  title,
+                });
+                setScreeningUrlInput("");
+                setScreeningTitleInput("");
+              })()
+            }
+            onAppend={({ url, title }) =>
+              (() => {
+                socketRef.current?.send("screening.url.add", {
+                  channelId: activeScreeningChannel.id,
+                  url,
+                  title,
+                });
+                setScreeningUrlInput("");
+                setScreeningTitleInput("");
+              })()
+            }
+            onPlaybackEvent={(type, payload) =>
+              socketRef.current?.send(type, {
+                channelId: activeScreeningChannel.id,
+                ...payload,
+              })
+            }
+            onInfo={showInfo}
+            onError={(title, message) => pushNotice("error", title, message)}
+          />
+        ) : null}
+
+        <section className={`chat-panel ${activeScreeningChannel ? "chat-panel--screening" : ""}`}>
+          {chatChannel?.type === "screening" ? null : (
+            <div className="chat-panel__toolbar">
+              <div className="chat-panel__title">
+                <div className="chat-panel__title-icon">
+                  {chatChannel?.type === "text" ? <HomeIcon /> : <HashIcon />}
+                </div>
+                <div>
+                  <h3>{chatChannel?.name || "主页"}</h3>
+                  <span>{chatChannel?.topic || bootstrap?.domain.description || "域内消息会显示在这里。"}</span>
+                </div>
               </div>
-              <div>
-                <h3>{chatChannel?.name || "主页"}</h3>
-                <span>{chatChannel?.topic || bootstrap?.domain.description || "域内消息会显示在这里。"}</span>
+              <div className="chat-panel__icons">
+                <button className="plain-icon-button">
+                  <SendIcon />
+                </button>
+                <button className="plain-icon-button">
+                  <TagIcon />
+                </button>
+                <button className="plain-icon-button">
+                  <ListIcon />
+                </button>
               </div>
             </div>
-            <div className="chat-panel__icons">
-              <button className="plain-icon-button">
-                <SendIcon />
-              </button>
-              <button className="plain-icon-button">
-                <TagIcon />
-              </button>
-              <button className="plain-icon-button">
-                <ListIcon />
-              </button>
-            </div>
-          </div>
+          )}
           <div className="message-list" ref={messageListRef}>
             {!deferredMessages.length ? (
               <div className="empty-state">这里还没有消息。可以先发一句，或者直接进入语音房。</div>
@@ -1709,16 +2058,34 @@ export function App() {
         </div>
 
         <div className="member-list">
+          {activeScreeningChannel ? (
+            <ScreeningPlaylistSection playlist={screeningSnapshot?.playlist || []} />
+          ) : null}
+          {activeScreeningChannel ? (
+            <MemberSection
+              title={`${screeningViewerMembers.length} 人正在观看 ${activeScreeningChannel.name}`}
+              members={screeningViewerMembers}
+              voiceMembers={voiceMembers}
+              onlineUsers={onlineUsers}
+              channelNameById={channelNameById}
+              showCount={false}
+              localAudioStream={localAudioStream}
+              remoteMedia={remoteMedia}
+              currentUserId={user?.id || 0}
+              currentUserMicEnabled={micEnabled}
+              showVoiceState
+            />
+          ) : null}
           <MemberSection
             title="在线"
-            members={(bootstrap?.members || []).filter((member) => onlineMemberIds.has(member.id))}
+            members={onlineMembers}
             voiceMembers={voiceMembers}
             onlineUsers={onlineUsers}
             channelNameById={channelNameById}
           />
           <MemberSection
             title="离线"
-            members={(bootstrap?.members || []).filter((member) => !onlineMemberIds.has(member.id))}
+            members={offlineMembers}
             voiceMembers={voiceMembers}
             onlineUsers={onlineUsers}
             channelNameById={channelNameById}
@@ -1819,6 +2186,14 @@ export function App() {
       ) : null}
 
       {maximizedScreen ? <ScreenPreviewModal screen={maximizedScreen} onClose={() => setMaximizedScreenKey(null)} /> : null}
+      {showScreenShareSheet ? (
+        <ScreenShareSheet
+          preset={screenSharePreset}
+          onChange={setScreenSharePreset}
+          onCancel={() => setShowScreenShareSheet(false)}
+          onConfirm={() => void confirmScreenShare()}
+        />
+      ) : null}
       <NoticeViewport notices={notices} onDismiss={dismissNotice} />
     </div>
   );
@@ -1849,18 +2224,393 @@ function NoticeViewport({
   );
 }
 
+function ScreeningRoomPanel({
+  channel,
+  snapshot,
+  currentUser,
+  authToken,
+  joinEpoch,
+  urlInput,
+  titleInput,
+  onUrlInputChange,
+  onTitleInputChange,
+  onReplace,
+  onAppend,
+  onPlaybackEvent,
+  onInfo,
+  onError,
+}: {
+  channel: Channel;
+  snapshot: ScreeningSnapshot | null;
+  currentUser: User | null;
+  authToken: string | null;
+  joinEpoch: number;
+  urlInput: string;
+  titleInput: string;
+  onUrlInputChange: (value: string) => void;
+  onTitleInputChange: (value: string) => void;
+  onReplace: (input: { url: string; title: string }) => void;
+  onAppend: (input: { url: string; title: string }) => void;
+  onPlaybackEvent: (type: string, payload: { itemId?: string; currentTime: number; playbackRate: number }) => void;
+  onInfo: (title: string, message: string) => void;
+  onError: (title: string, message: string) => void;
+}) {
+  const playerRef = useRef<ScreeningPlayerElement | null>(null);
+  const tickTimerRef = useRef<number | null>(null);
+  const lastLoadedItemRef = useRef<string>("");
+  const lastAppliedJoinEpochRef = useRef(-1);
+  const previousControllerRef = useRef(false);
+  const [resolvingURL, setResolvingURL] = useState(false);
+
+  const state = snapshot?.state || null;
+  const viewers = snapshot?.viewers || [];
+  const isController = Boolean(currentUser && state && state.controllerUserId === currentUser.id);
+  const controllerName = viewers.find((item) => item.user.id === state?.controllerUserId)?.user.displayName || "当前主持人";
+
+  useEffect(() => {
+    const player = playerRef.current;
+    if (!player) return;
+    if (!state) {
+      if (player.src) {
+        player.src = "";
+      }
+      lastLoadedItemRef.current = "";
+      lastAppliedJoinEpochRef.current = -1;
+      return;
+    }
+    const shouldReloadForJoin = lastAppliedJoinEpochRef.current !== joinEpoch;
+    if (
+      state.currentItemId &&
+      (lastLoadedItemRef.current !== state.currentItemId || player.src !== (state.currentUrl || "") || shouldReloadForJoin)
+    ) {
+      lastLoadedItemRef.current = state.currentItemId;
+      lastAppliedJoinEpochRef.current = joinEpoch;
+      player.src = state.currentUrl || "";
+      console.info(`[screening-ui][${new Date().toISOString()}] screening:player:src-assigned`, {
+        channelId: state.channelId,
+        itemId: state.currentItemId,
+        currentUrl: state.currentUrl,
+        joinEpoch,
+      });
+    } else if (!state.currentItemId && player.src) {
+      player.src = "";
+      lastLoadedItemRef.current = "";
+    }
+  }, [joinEpoch, state?.channelId, state?.currentItemId, state?.currentUrl, state]);
+
+  useEffect(() => {
+    const player = playerRef.current;
+    if (!player || !state || !state.currentItemId) return;
+
+    const elapsed = state.playbackState === "playing" && state.updatedAt ? Math.max(0, (Date.now() - new Date(state.updatedAt).getTime()) / 1000) : 0;
+    const targetTime = state.playbackState === "playing" ? state.currentTime + elapsed * (state.playbackRate || 1) : state.currentTime;
+    if (state.playbackRate > 0 && Math.abs(player.playbackRate - state.playbackRate) > 0.01) {
+      player.playbackRate = state.playbackRate;
+    }
+    if (Math.abs(player.currentTime - targetTime) >= 3) {
+      try {
+        player.currentTime = targetTime;
+      } catch {
+        // ignore seek race during loading
+      }
+    }
+    if (state.playbackState === "playing" && player.paused) {
+      void player.play().catch(() => undefined);
+    }
+    if ((state.playbackState === "paused" || state.playbackState === "loading" || state.playbackState === "ended" || state.playbackState === "idle") && !player.paused) {
+      void player.pause().catch(() => undefined);
+    }
+  }, [state]);
+
+  useEffect(() => {
+    if (tickTimerRef.current) {
+      window.clearInterval(tickTimerRef.current);
+      tickTimerRef.current = null;
+    }
+    if (!isController || !state || state.playbackState !== "playing") {
+      return;
+    }
+    tickTimerRef.current = window.setInterval(() => {
+      const player = playerRef.current;
+      if (!player || !state.currentItemId) return;
+      onPlaybackEvent("screening.tick", {
+        itemId: state.currentItemId,
+        currentTime: player.currentTime,
+        playbackRate: player.playbackRate || 1,
+      });
+    }, 2500);
+    return () => {
+      if (tickTimerRef.current) {
+        window.clearInterval(tickTimerRef.current);
+        tickTimerRef.current = null;
+      }
+    };
+  }, [isController, onPlaybackEvent, state]);
+
+  useEffect(() => {
+    const player = playerRef.current;
+    if (!player) return;
+
+    const handleCanPlay = () => {
+      if (!isController || !state?.awaitingReady || !state.currentItemId) return;
+      onPlaybackEvent("screening.controller.ready", {
+        itemId: state.currentItemId,
+        currentTime: 0,
+        playbackRate: player.playbackRate || 1,
+      });
+    };
+    const handlePlay = () => {
+      if (!isController || !state?.currentItemId) return;
+      onPlaybackEvent("screening.play", {
+        itemId: state.currentItemId,
+        currentTime: player.currentTime || 0,
+        playbackRate: player.playbackRate || 1,
+      });
+    };
+    const handlePause = () => {
+      if (!isController || !state?.currentItemId || state.playbackState === "loading") return;
+      onPlaybackEvent("screening.pause", {
+        itemId: state.currentItemId,
+        currentTime: player.currentTime || 0,
+        playbackRate: player.playbackRate || 1,
+      });
+    };
+    const handleSeeked = () => {
+      if (!isController || !state?.currentItemId) return;
+      onPlaybackEvent("screening.seek", {
+        itemId: state.currentItemId,
+        currentTime: player.currentTime || 0,
+        playbackRate: player.playbackRate || 1,
+      });
+    };
+    const handleRateChange = () => {
+      if (!isController || !state?.currentItemId) return;
+      onPlaybackEvent("screening.rate", {
+        itemId: state.currentItemId,
+        currentTime: player.currentTime || 0,
+        playbackRate: player.playbackRate || 1,
+      });
+    };
+    const handleEnded = () => {
+      if (!isController || !state?.currentItemId) return;
+      onPlaybackEvent("screening.item.ended", {
+        itemId: state.currentItemId,
+        currentTime: 0,
+        playbackRate: player.playbackRate || 1,
+      });
+    };
+
+    player.addEventListener("can-play", handleCanPlay);
+    player.addEventListener("play", handlePlay);
+    player.addEventListener("pause", handlePause);
+    player.addEventListener("seeked", handleSeeked);
+    player.addEventListener("rate-change", handleRateChange);
+    player.addEventListener("end", handleEnded);
+
+    return () => {
+      player.removeEventListener("can-play", handleCanPlay);
+      player.removeEventListener("play", handlePlay);
+      player.removeEventListener("pause", handlePause);
+      player.removeEventListener("seeked", handleSeeked);
+      player.removeEventListener("rate-change", handleRateChange);
+      player.removeEventListener("end", handleEnded);
+    };
+  }, [isController, onPlaybackEvent, state]);
+
+  useEffect(() => {
+    const becameController = isController && !previousControllerRef.current;
+    previousControllerRef.current = isController;
+    if (!becameController || !state?.currentItemId) {
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      const player = playerRef.current;
+      if (!player) return;
+      const payload = {
+        itemId: state.currentItemId,
+        currentTime: Number.isFinite(player.currentTime) ? player.currentTime : state.currentTime,
+        playbackRate: player.playbackRate || state.playbackRate || 1,
+      };
+      if (state.awaitingReady) {
+        onPlaybackEvent("screening.controller.ready", payload);
+        return;
+      }
+      onPlaybackEvent(player.paused ? "screening.pause" : "screening.tick", payload);
+    }, 180);
+    return () => window.clearTimeout(timer);
+  }, [isController, onPlaybackEvent, state]);
+
+  function isBilibiliVideoURL(value: string) {
+    try {
+      const parsed = new URL(value);
+      return /(^|\.)bilibili\.com$/i.test(parsed.hostname) && /\/video\//.test(parsed.pathname) && /BV[0-9A-Za-z]+/.test(value);
+    } catch {
+      return false;
+    }
+  }
+
+  async function prepareSubmissionInput() {
+    const url = urlInput.trim();
+    if (!url) {
+      onError("放映室操作失败", "请输入可直接播放的视频 URL");
+      return null;
+    }
+
+    const title = titleInput.trim();
+    if (!isBilibiliVideoURL(url)) {
+      return { url, title };
+    }
+    if (!authToken) {
+      onError("B 站地址解析失败", "当前登录状态无效，无法解析 B 站视频地址");
+      return null;
+    }
+
+    setResolvingURL(true);
+    try {
+      const resolved = await resolveScreeningUrl(authToken, { url });
+      onUrlInputChange(resolved.resolvedUrl);
+      onInfo("B 站地址解析成功", "已将页面地址转换为可播放直链，本次操作会使用解析后的地址。");
+      return { url: resolved.resolvedUrl, title };
+    } catch (error) {
+      const message = error instanceof Error && error.message.trim() ? error.message : "无法将该 B 站视频地址转换为直链";
+      onError("B 站地址解析失败", message);
+      return null;
+    } finally {
+      setResolvingURL(false);
+    }
+  }
+
+  return (
+    <section className="screening-panel">
+      <div className="screening-panel__header">
+        <div className="screening-panel__title">
+          <div className="chat-panel__title-icon">
+            <PlayIcon />
+          </div>
+          <div>
+            <h3>{channel.name}</h3>
+            <span>{state?.currentTitle || channel.topic || "通过可直链访问的视频 URL 发起同步观影。"}</span>
+          </div>
+        </div>
+        <div className="screening-panel__meta">
+          <span className="connection-badge">{state?.playbackState || "idle"}</span>
+          <span className="screening-panel__controller">控制者：{controllerName}</span>
+        </div>
+      </div>
+
+      <div className="screening-stage">
+        <div className="screening-stage__video-wrap">
+          <media-player
+            ref={(node: HTMLElement | null) => {
+              playerRef.current = node as ScreeningPlayerElement | null;
+            }}
+            class="screening-stage__player"
+            aspect-ratio="16/9"
+            src={state?.currentUrl || undefined}
+            title={state?.currentTitle || channel.name}
+            viewType="video"
+            streamType="on-demand"
+            load="visible"
+            preload="auto"
+            playsinline
+            crossorigin
+          >
+            <media-outlet></media-outlet>
+            <media-community-skin></media-community-skin>
+          </media-player>
+          {!state?.currentUrl ? <div className="screening-stage__empty">输入直链视频 URL 后即可开始放映</div> : null}
+        </div>
+      </div>
+
+      <div className="screening-composer">
+        <div className="screening-composer__inputs">
+          <input value={urlInput} onChange={(event) => onUrlInputChange(event.target.value)} placeholder="输入可直接播放的视频 URL，例如 https://.../demo.mp4" />
+          <input value={titleInput} onChange={(event) => onTitleInputChange(event.target.value)} placeholder="可选标题" />
+        </div>
+        <div className="screening-composer__actions">
+          <button
+            className="action-pill"
+            disabled={resolvingURL}
+            onClick={() => {
+              void (async () => {
+                const next = await prepareSubmissionInput();
+                if (!next) return;
+                onReplace(next);
+              })();
+            }}
+          >
+            {resolvingURL ? "解析中..." : "替换当前并开始"}
+          </button>
+          <button
+            className="action-pill"
+            disabled={resolvingURL}
+            onClick={() => {
+              void (async () => {
+                const next = await prepareSubmissionInput();
+                if (!next) return;
+                onAppend(next);
+              })();
+            }}
+          >
+            {resolvingURL ? "解析中..." : "加入播放列表"}
+          </button>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function ScreeningPlaylistSection({
+  playlist,
+}: {
+  playlist: ScreeningPlaylistItem[];
+}) {
+  return (
+    <section className="member-section">
+      <h4>{`播放列表 · ${playlist.length}`}</h4>
+      <div className="screening-playlist-sidebar">
+        {playlist.length ? (
+          playlist.map((item, index) => (
+            <div key={item.itemId} className="screening-playlist__item">
+              <span>{index + 1}</span>
+              <div>
+                <strong>{item.title || item.url}</strong>
+                <p>{item.url}</p>
+              </div>
+            </div>
+          ))
+        ) : (
+          <div className="empty-state empty-state--small">当前播放列表为空</div>
+        )}
+      </div>
+    </section>
+  );
+}
+
 function MemberSection({
   title,
   members,
   voiceMembers,
   onlineUsers,
   channelNameById,
+  showCount = true,
+  localAudioStream,
+  remoteMedia,
+  currentUserId = 0,
+  currentUserMicEnabled = true,
+  showVoiceState = false,
 }: {
   title: string;
   members: DomainMember[];
   voiceMembers: Map<number, PresenceMember>;
   onlineUsers: Map<number, OnlineUserPresence>;
   channelNameById: Map<number, string>;
+  showCount?: boolean;
+  localAudioStream?: MediaStream | null;
+  remoteMedia?: Map<number, RemoteMedia>;
+  currentUserId?: number;
+  currentUserMicEnabled?: boolean;
+  showVoiceState?: boolean;
 }) {
   const sortedMembers = [...members].sort((left, right) => {
     if (left.role !== right.role) {
@@ -1873,39 +2623,83 @@ function MemberSection({
   return (
     <section className="member-section">
       <h4>
-        {title} · {members.length}
+        {showCount ? `${title} · ${members.length}` : title}
       </h4>
       {members.length ? (
         sortedMembers.map((member) => {
           const presence = voiceMembers.get(member.id);
           const online = onlineUsers.get(member.id);
           return (
-            <div key={member.id} className="member-row">
-              <div className="avatar" style={{ background: member.avatarColor }}>
-                {initials(member.displayName)}
-              </div>
-              <div className="member-row__content">
-                <strong>
-                  {member.displayName}
-                  {member.role === "owner" ? <span className="member-role-badge">域主</span> : null}
-                </strong>
-                <span>
-                  {presence
-                    ? `${online?.domainId ? `域 ${online.domainId}` : "当前域"} · 正在 ${channelNameById.get(presence.channelId) || "语音频道"}`
-                    : online
-                      ? online.currentChannelId
-                        ? `域 ${online.domainId} · 正在 ${channelNameById.get(online.currentChannelId) || "语音频道"}`
-                        : `域 ${online.domainId} · 在线`
-                      : "离线"}
-                </span>
-              </div>
-            </div>
+            <MemberRowItem
+              key={member.id}
+              member={member}
+              presence={presence}
+              online={online}
+              channelNameById={channelNameById}
+              localAudioStream={localAudioStream || null}
+              remoteMedia={remoteMedia || null}
+              currentUserId={currentUserId}
+              currentUserMicEnabled={currentUserMicEnabled}
+              showVoiceState={showVoiceState}
+            />
           );
         })
       ) : (
         <div className="empty-state empty-state--small">暂无成员</div>
       )}
     </section>
+  );
+}
+
+function MemberRowItem({
+  member,
+  presence,
+  online,
+  channelNameById,
+  localAudioStream,
+  remoteMedia,
+  currentUserId,
+  currentUserMicEnabled,
+  showVoiceState,
+}: {
+  member: DomainMember;
+  presence?: PresenceMember;
+  online?: OnlineUserPresence;
+  channelNameById: Map<number, string>;
+  localAudioStream: MediaStream | null;
+  remoteMedia: Map<number, RemoteMedia> | null;
+  currentUserId: number;
+  currentUserMicEnabled: boolean;
+  showVoiceState: boolean;
+}) {
+  const stream =
+    member.id === currentUserId ? localAudioStream : remoteMedia?.get(member.id)?.audioStream || null;
+  const micState = member.id === currentUserId ? currentUserMicEnabled : Boolean(presence?.micEnabled);
+  const speaking = useSpeakingState(stream, micState);
+
+  return (
+    <div className="member-row">
+      <div className={`avatar ${speaking ? "avatar--speaking" : ""}`} style={{ background: member.avatarColor }}>
+        {initials(member.displayName)}
+      </div>
+      <div className="member-row__content">
+        <strong>
+          {member.displayName}
+          {member.role === "owner" ? <span className="member-role-badge">域主</span> : null}
+        </strong>
+        <span>
+          {showVoiceState && presence
+            ? `${micState ? "开麦" : "静音"}${online ? ` · 域 ${online.domainId} · 正在 ${channelNameById.get(presence.channelId) || "房间"}` : ""}`
+            : presence
+              ? `${online?.domainId ? `域 ${online.domainId}` : "当前域"} · 正在 ${channelNameById.get(presence.channelId) || "语音频道"}`
+              : online
+                ? online.currentChannelId
+                  ? `域 ${online.domainId} · 正在 ${channelNameById.get(online.currentChannelId) || "语音频道"}`
+                  : `域 ${online.domainId} · 在线`
+                : "离线"}
+        </span>
+      </div>
+    </div>
   );
 }
 
@@ -2026,28 +2820,35 @@ function RemoteAudioLayer({
   deafened: boolean;
   remoteVolume: number;
 }) {
-  const audioRefs = useRef(new Map<number, HTMLAudioElement>());
+  const audioRefs = useRef(new Map<string, HTMLAudioElement>());
 
   useEffect(() => {
-    const activeIds = new Set<number>();
+    const activeIds = new Set<string>();
 
     remoteMedia.forEach((entry, userId) => {
-      if (!entry.audioStream || userId === selfUserId) return;
-      activeIds.add(userId);
-      const element = audioRefs.current.get(userId);
-      if (!element) return;
-      if (element.srcObject !== entry.audioStream) {
-        element.srcObject = entry.audioStream;
-      }
-      element.muted = deafened;
-      element.volume = Math.max(0, Math.min(1, remoteVolume / 100));
-      void element.play().catch((error) => {
-        console.error("remote audio play failed", error);
+      if (userId === selfUserId) return;
+      const streams = [
+        { key: `${userId}:voice`, stream: entry.audioStream },
+        { key: `${userId}:screen`, stream: entry.displayAudioStream },
+      ];
+      streams.forEach(({ key, stream }) => {
+        if (!stream) return;
+        activeIds.add(key);
+        const element = audioRefs.current.get(key);
+        if (!element) return;
+        if (element.srcObject !== stream) {
+          element.srcObject = stream;
+        }
+        element.muted = deafened;
+        element.volume = Math.max(0, Math.min(1, remoteVolume / 100));
+        void element.play().catch((error) => {
+          console.error("remote audio play failed", error);
+        });
       });
     });
 
-    audioRefs.current.forEach((element, userId) => {
-      if (activeIds.has(userId)) return;
+    audioRefs.current.forEach((element, key) => {
+      if (activeIds.has(key)) return;
       element.pause();
       element.srcObject = null;
     });
@@ -2055,20 +2856,111 @@ function RemoteAudioLayer({
 
   return (
     <div className="remote-audio-layer" aria-hidden="true">
-      {[...remoteMedia.entries()].map(([userId]) => (
+      {[...remoteMedia.entries()].flatMap(([userId]) => [
         <audio
-          key={userId}
+          key={`${userId}:voice`}
           ref={(node) => {
             if (node) {
-              audioRefs.current.set(userId, node);
+              audioRefs.current.set(`${userId}:voice`, node);
             } else {
-              audioRefs.current.delete(userId);
+              audioRefs.current.delete(`${userId}:voice`);
             }
           }}
           autoPlay
           playsInline
-        />
-      ))}
+        />,
+        <audio
+          key={`${userId}:screen`}
+          ref={(node) => {
+            if (node) {
+              audioRefs.current.set(`${userId}:screen`, node);
+            } else {
+              audioRefs.current.delete(`${userId}:screen`);
+            }
+          }}
+          autoPlay
+          playsInline
+        />,
+      ])}
+    </div>
+  );
+}
+
+function ScreenShareSheet({
+  preset,
+  onChange,
+  onCancel,
+  onConfirm,
+}: {
+  preset: ScreenSharePreset;
+  onChange: (next: ScreenSharePreset) => void;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  const currentModeLabel = preset.surface === "tab" ? "共享当前标签页音频（推荐）" : "共享系统音频（高风险）";
+  const riskText =
+    preset.surface === "tab"
+      ? "浏览器支持时会尽量启用 restrictOwnAudio 和 suppressLocalAudioPlayback，优先避免把当前通话页自己的声音再录进去。"
+      : "系统音频可能把远端通话声、通知声一起共享出去。建议佩戴耳机，或改用“共享标签页音频”。";
+
+  return (
+    <div className="screen-share-sheet">
+      <div className="screen-share-sheet__backdrop" onClick={onCancel} />
+      <div className="screen-share-sheet__panel" role="dialog" aria-modal="true" aria-label="屏幕共享设置">
+        <div className="eyebrow">SCREEN SHARE</div>
+        <h3>选择共享方式</h3>
+        <p className="screen-share-sheet__summary">主流会议产品通常优先推荐标签页音频；共享整个屏幕时，只能尽量降低把远端声音也带出去的风险。</p>
+
+        <div className="screen-share-sheet__section">
+          <strong>共享范围</strong>
+          <div className="screen-share-sheet__choices">
+            <button
+              className={`screen-share-choice ${preset.surface === "tab" ? "screen-share-choice--active" : ""}`}
+              onClick={() => onChange({ ...preset, surface: "tab" })}
+            >
+              <span>浏览器标签页</span>
+              <small>适合教程、网页演示，音频控制更稳</small>
+            </button>
+            <button
+              className={`screen-share-choice ${preset.surface === "screen" ? "screen-share-choice--active" : ""}`}
+              onClick={() => onChange({ ...preset, surface: "screen" })}
+            >
+              <span>整个屏幕 / 窗口</span>
+              <small>更通用，但共享系统音频时风险更高</small>
+            </button>
+          </div>
+        </div>
+
+        <div className="screen-share-sheet__section">
+          <strong>音频</strong>
+          <div className="screen-share-sheet__toggle-row">
+            <button
+              className={`screen-share-chip ${preset.audioMode === "off" ? "screen-share-chip--active" : ""}`}
+              onClick={() => onChange({ ...preset, audioMode: "off" })}
+            >
+              不共享音频
+            </button>
+            <button
+              className={`screen-share-chip ${preset.audioMode === "share" ? "screen-share-chip--active" : ""}`}
+              onClick={() => onChange({ ...preset, audioMode: "share" })}
+            >
+              {currentModeLabel}
+            </button>
+          </div>
+          <p className={`screen-share-sheet__risk ${preset.audioMode === "share" ? "screen-share-sheet__risk--warning" : ""}`}>
+            {preset.audioMode === "share" ? riskText : "只共享画面，不采集标签页或系统音频。"}
+          </p>
+        </div>
+
+        <div className="screen-share-sheet__actions">
+          <button className="action-pill" onClick={onCancel}>
+            取消
+          </button>
+          <button className="action-pill action-pill--primary" onClick={onConfirm}>
+            选择源并开始共享
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -2263,6 +3155,14 @@ function VoiceChannelIcon() {
     <svg viewBox="0 0 24 24" aria-hidden="true">
       <circle cx="12" cy="12" r="8.3" fill="none" stroke="currentColor" strokeWidth="1.8" />
       <circle cx="12" cy="12" r="3.1" fill="none" stroke="currentColor" strokeWidth="1.8" />
+    </svg>
+  );
+}
+
+function PlayIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M8 6.5v11l8.6-5.5L8 6.5Z" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" />
     </svg>
   );
 }

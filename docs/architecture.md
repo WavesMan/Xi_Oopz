@@ -105,6 +105,17 @@ Client to server events:
 - `rtc.answer`
 - `rtc.ice_candidate`
 - `heartbeat`
+- `screening.join`
+- `screening.leave`
+- `screening.url.replace`
+- `screening.url.add`
+- `screening.controller.ready`
+- `screening.play`
+- `screening.pause`
+- `screening.seek`
+- `screening.tick`
+- `screening.rate`
+- `screening.item.ended`
 
 Server to client events:
 
@@ -118,7 +129,103 @@ Server to client events:
 - `rtc.offer`
 - `rtc.answer`
 - `rtc.ice_candidate`
+- `screening.snapshot`
+- `screening.playlist.updated`
+- `screening.play`
+- `screening.pause`
+- `screening.seek`
+- `screening.tick`
+- `screening.rate`
 - `error`
+
+## Screening Room MVP
+
+### Product Goal
+
+Add a new channel type:
+
+- `screening`
+
+A screening room does not relay media streams between members. Every viewer loads the same playable direct video URL locally, while the server synchronizes only realtime room state through Redis + WebSocket.
+
+The first version keeps screening room state **out of MySQL**. Redis is the source of truth for:
+
+- current controller
+- current item URL
+- playback state
+- playback time
+- playback rate
+- viewers currently in the room
+- queued playlist items
+
+### Playback Rules
+
+1. A controller chooses a direct video URL.
+2. The controller can:
+   - replace the current video and start after ready
+   - append the URL to the playlist
+3. Replacing the current item changes the room state to `loading`.
+4. Viewers load the same URL locally.
+5. Playback starts only after the controller confirms the player has buffered enough data.
+6. While playing, the controller sends periodic sync ticks.
+7. Viewer drift under `3s` is ignored.
+8. Viewer drift at or above `3s` triggers a seek correction.
+
+### Redis Keys
+
+For `channelId = 123`:
+
+- `screening:room:123:state`
+  - type: `HASH`
+  - fields:
+    - `controller_user_id`
+    - `current_item_id`
+    - `current_url`
+    - `current_title`
+    - `playback_state`
+    - `current_time`
+    - `playback_rate`
+    - `updated_at`
+    - `started_at`
+    - `awaiting_ready`
+    - `sync_token`
+
+- `screening:room:123:viewers`
+  - type: `HASH`
+  - field: `userId`
+  - value: JSON viewer payload
+
+- `screening:room:123:playlist`
+  - type: `LIST`
+  - value: JSON playlist item
+
+### Room Flow
+
+1. User selects a `screening` channel.
+2. Frontend loads messages as usual and sends `screening.join`.
+3. Backend stores the viewer in Redis and returns `screening.snapshot`.
+4. Controller replaces current URL:
+   - backend updates Redis state to `loading`
+   - backend broadcasts new snapshot
+   - all clients load the new source locally
+5. Controller reaches a ready state in the player and sends `screening.controller.ready`.
+6. Backend changes room state to `playing` and broadcasts `screening.play`.
+7. Controller emits `screening.tick` every `2-3s`.
+8. Clients compare their local position with the target position and only seek on `>= 3s` drift.
+
+### Frontend MVP Notes
+
+The first implementation uses the native HTML5 `<video>` player for speed and integration simplicity.
+
+This first version supports:
+
+- direct file URLs such as `mp4`, `webm`, and compatible direct media sources
+- replace-now playback
+- append-to-playlist
+- controller-ready gate before playback begins
+- periodic playback synchronization
+
+The player shell can be upgraded later without changing the Redis or WebSocket contract.
 
 ## Redis Strategy
 
@@ -130,6 +237,12 @@ Keys:
   - set of active voice channel IDs
 - `channel:presence:{channelId}`
   - hash keyed by `userId`, value is a JSON payload with mic/screen/display name/avatar color
+- `screening:room:{channelId}:state`
+  - hash storing current playback state for a screening channel
+- `screening:room:{channelId}:viewers`
+  - hash keyed by `userId`, value is a JSON viewer payload
+- `screening:room:{channelId}:playlist`
+  - list storing queued playable URLs
 
 Lifecycle:
 
@@ -137,6 +250,7 @@ Lifecycle:
 - on toggle: `HSET channel:presence:{id}`
 - on leave: `HDEL channel:presence:{id}`
 - if hash becomes empty: `SREM online:channels`
+- screening room state is updated on controller actions and periodic playback ticks
 
 ## MySQL Tables
 

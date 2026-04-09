@@ -12,6 +12,7 @@ type PeerWrapper = {
   hasBoundLocalTracks: boolean;
   pendingIceCandidates: RTCIceCandidateInit[];
   audioTransceiver: RTCRtpTransceiver;
+  displayAudioTransceiver: RTCRtpTransceiver;
   screenTransceiver: RTCRtpTransceiver;
 };
 
@@ -24,6 +25,13 @@ type SignalPayload = {
 };
 
 type MediaSyncKind = "audio" | "screen";
+
+export type ScreenShareSurface = "tab" | "screen";
+export type ScreenAudioMode = "off" | "share";
+export type ScreenShareOptions = {
+  surface: ScreenShareSurface;
+  audioMode: ScreenAudioMode;
+};
 
 const DEFAULT_ICE_SERVERS: RTCIceServer[] = [
   { urls: "stun:stun.l.google.com:19302" },
@@ -194,14 +202,56 @@ export class RTCController {
     this.schedulePrewarmRelease();
   }
 
-  async startScreenShare() {
+  async startScreenShare(options: ScreenShareOptions) {
     if (this.localScreenStream) return;
-    this.localScreenStream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
+    const supported = navigator.mediaDevices.getSupportedConstraints() as MediaTrackSupportedConstraints & {
+      restrictOwnAudio?: boolean;
+    };
+    const shareAudio = options.audioMode === "share";
+    const displayOptions: Record<string, unknown> = {
+      video: true,
+      audio: false,
+    };
+
+    if (options.surface === "tab") {
+      displayOptions.preferCurrentTab = true;
+      displayOptions.selfBrowserSurface = "include";
+      displayOptions.systemAudio = "exclude";
+      if (shareAudio) {
+        const audioConstraints: Record<string, unknown> = {
+          suppressLocalAudioPlayback: true,
+        };
+        if (supported.restrictOwnAudio) {
+          audioConstraints.restrictOwnAudio = true;
+        }
+        displayOptions.audio = audioConstraints;
+      }
+    } else {
+      displayOptions.selfBrowserSurface = "exclude";
+      displayOptions.systemAudio = shareAudio ? "include" : "exclude";
+      if (shareAudio) {
+        const audioConstraints: Record<string, unknown> = {
+          suppressLocalAudioPlayback: true,
+        };
+        if (supported.restrictOwnAudio) {
+          audioConstraints.restrictOwnAudio = true;
+        }
+        displayOptions.audio = audioConstraints;
+      }
+    }
+
+    this.localScreenStream = await navigator.mediaDevices.getDisplayMedia(displayOptions as DisplayMediaStreamOptions);
     this.onLocalScreenChanged(this.localScreenStream);
 
     const [screenTrack] = this.localScreenStream.getVideoTracks();
     screenTrack?.addEventListener("ended", () => {
       void this.stopScreenShare(true);
+    });
+
+    this.localScreenStream.getAudioTracks().forEach((track) => {
+      track.addEventListener("ended", () => {
+        void this.applyLocalTracksToAllPeers();
+      });
     });
 
     await this.applyLocalTracksToAllPeers();
@@ -540,6 +590,7 @@ export class RTCController {
       iceTransportPolicy: "all",
     });
     const audioTransceiver = pc.addTransceiver("audio", { direction: "recvonly" });
+    const displayAudioTransceiver = pc.addTransceiver("audio", { direction: "recvonly" });
     const screenTransceiver = pc.addTransceiver("video", { direction: "recvonly" });
 
     const wrapper: PeerWrapper = {
@@ -553,6 +604,7 @@ export class RTCController {
       hasBoundLocalTracks: false,
       pendingIceCandidates: [],
       audioTransceiver,
+      displayAudioTransceiver,
       screenTransceiver,
     };
 
@@ -577,12 +629,18 @@ export class RTCController {
       const current = this.remoteMedia.get(user.id) || {
         user,
         audioStream: null,
+        displayAudioStream: null,
         screenStream: null,
       };
 
       if (event.track.kind === "audio") {
-        current.audioStream = new MediaStream([event.track]);
-        this.clearMediaReconnect(user.id, "audio");
+        if (event.transceiver === wrapper.displayAudioTransceiver) {
+          current.displayAudioStream = new MediaStream([event.track]);
+          this.clearMediaReconnect(user.id, "screen");
+        } else {
+          current.audioStream = new MediaStream([event.track]);
+          this.clearMediaReconnect(user.id, "audio");
+        }
       }
       if (event.track.kind === "video") {
         current.screenStream = event.streams[0] || new MediaStream([event.track]);
@@ -593,8 +651,13 @@ export class RTCController {
         const media = this.remoteMedia.get(user.id);
         if (!media) return;
         if (event.track.kind === "audio") {
-          media.audioStream = null;
-          this.ensureMediaFlow(user.id, "audio", "remote-track-ended");
+          if (event.transceiver === wrapper.displayAudioTransceiver) {
+            media.displayAudioStream = null;
+            this.ensureMediaFlow(user.id, "screen", "remote-track-ended");
+          } else {
+            media.audioStream = null;
+            this.ensureMediaFlow(user.id, "audio", "remote-track-ended");
+          }
         } else if (event.track.kind === "video") {
           media.screenStream = null;
           this.ensureMediaFlow(user.id, "screen", "remote-track-ended");
@@ -605,7 +668,7 @@ export class RTCController {
 
       event.track.addEventListener("mute", () => {
         if (event.track.kind === "audio") {
-          this.ensureMediaFlow(user.id, "audio", "remote-track-muted");
+          this.ensureMediaFlow(user.id, event.transceiver === wrapper.displayAudioTransceiver ? "screen" : "audio", "remote-track-muted");
         } else if (event.track.kind === "video") {
           this.ensureMediaFlow(user.id, "screen", "remote-track-muted");
         }
@@ -641,10 +704,14 @@ export class RTCController {
 
   private async bindLocalTracks(wrapper: PeerWrapper, includeLocalTracks: boolean) {
     const [audioTrack] = includeLocalTracks ? this.localAudioStream?.getAudioTracks() || [] : [];
+    const [displayAudioTrack] = includeLocalTracks ? this.localScreenStream?.getAudioTracks() || [] : [];
     const [screenTrack] = includeLocalTracks ? this.localScreenStream?.getVideoTracks() || [] : [];
 
     await wrapper.audioTransceiver.sender.replaceTrack(audioTrack || null);
     wrapper.audioTransceiver.direction = audioTrack ? "sendrecv" : "recvonly";
+
+    await wrapper.displayAudioTransceiver.sender.replaceTrack(displayAudioTrack || null);
+    wrapper.displayAudioTransceiver.direction = displayAudioTrack ? "sendrecv" : "recvonly";
 
     await wrapper.screenTransceiver.sender.replaceTrack(screenTrack || null);
     wrapper.screenTransceiver.direction = screenTrack ? "sendrecv" : "recvonly";

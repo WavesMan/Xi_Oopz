@@ -26,7 +26,7 @@ export type Channel = {
   domainId: number;
   categoryId?: number;
   name: string;
-  type: "text" | "voice";
+  type: "text" | "voice" | "screening";
   topic: string;
   position: number;
   maxMembers: number;
@@ -73,6 +73,7 @@ export type OnlineUserPresence = {
 export type DomainPresenceResponse = {
   onlineUsers: OnlineUserPresence[];
   voiceMembers: Record<string, PresenceMember[]>;
+  screeningMembers: Record<string, ScreeningViewer[]>;
   onlineCounts: Record<string, number>;
 };
 
@@ -90,9 +91,46 @@ export type BootstrapResponse = {
   stunServers: RTCIceServer[];
 };
 
+export type ScreeningViewer = {
+  user: User;
+  ready: boolean;
+  joinedAt: string;
+  lastPingAt: string;
+};
+
+export type ScreeningPlaylistItem = {
+  itemId: string;
+  url: string;
+  title: string;
+  addedBy: number;
+  addedAt: string;
+};
+
+export type ScreeningState = {
+  channelId: number;
+  controllerUserId: number;
+  currentItemId: string;
+  currentUrl: string;
+  currentTitle: string;
+  playbackState: "idle" | "loading" | "ready" | "playing" | "paused" | "ended";
+  currentTime: number;
+  playbackRate: number;
+  updatedAt: string;
+  startedAt: string;
+  awaitingReady: boolean;
+  syncToken: number;
+};
+
+export type ScreeningSnapshot = {
+  state: ScreeningState;
+  viewers: ScreeningViewer[];
+  playlist: ScreeningPlaylistItem[];
+};
+
 export type RemoteMedia = {
   user: User;
   audioStream: MediaStream | null;
+  displayAudioStream: MediaStream | null;
   screenStream: MediaStream | null;
 };
 

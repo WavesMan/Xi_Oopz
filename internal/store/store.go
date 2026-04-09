@@ -103,8 +103,21 @@ func (s *Store) EnsureSeedData() error {
 			},
 		},
 		{
-			name:     "CHATTING",
+			name:     "WATCH PARTY",
 			position: 3,
+			channels: []struct {
+				name        string
+				channelType string
+				topic       string
+				position    int
+				maxMembers  int
+			}{
+				{name: "movie-room", channelType: "screening", topic: "Sync a direct video URL and watch together.", position: 1, maxMembers: 24},
+			},
+		},
+		{
+			name:     "CHATTING",
+			position: 4,
 			channels: []struct {
 				name        string
 				channelType string
@@ -439,6 +452,17 @@ func (s *Store) CreateDomain(ownerID int64, name, description, accentColor strin
 	if err != nil {
 		return models.Domain{}, err
 	}
+	screeningCategoryRes, err := tx.Exec(`
+		INSERT INTO channel_categories (domain_id, name, position, created_at)
+		VALUES (?, ?, ?, ?)
+	`, domainID, "SCREENING ROOMS", 3, now)
+	if err != nil {
+		return models.Domain{}, err
+	}
+	screeningCategoryID, err := screeningCategoryRes.LastInsertId()
+	if err != nil {
+		return models.Domain{}, err
+	}
 	if _, err := tx.Exec(`
 		INSERT INTO channels (domain_id, category_id, name, channel_type, topic, position, max_members, created_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -449,6 +473,12 @@ func (s *Store) CreateDomain(ownerID int64, name, description, accentColor strin
 		INSERT INTO channels (domain_id, category_id, name, channel_type, topic, position, max_members, created_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 	`, domainID, voiceCategoryID, "lobby", "voice", "域内默认语音频道。", 1, 16, now); err != nil {
+		return models.Domain{}, err
+	}
+	if _, err := tx.Exec(`
+		INSERT INTO channels (domain_id, category_id, name, channel_type, topic, position, max_members, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+	`, domainID, screeningCategoryID, "movie-room", "screening", "域内默认放映室，可同步播放直链视频。", 1, 24, now); err != nil {
 		return models.Domain{}, err
 	}
 
@@ -651,8 +681,8 @@ func (s *Store) CreateChannel(domainID int64, categoryID *int64, name, channelTy
 	if name == "" {
 		return models.Channel{}, fmt.Errorf("channel name is required")
 	}
-	if channelType != "text" && channelType != "voice" {
-		return models.Channel{}, fmt.Errorf("channel type must be text or voice")
+	if channelType != "text" && channelType != "voice" && channelType != "screening" {
+		return models.Channel{}, fmt.Errorf("channel type must be text, voice, or screening")
 	}
 	if channelType == "text" {
 		maxMembers = 0
@@ -743,7 +773,11 @@ func (s *Store) GetDefaultChannel(domainID int64) (*models.Channel, error) {
 		SELECT id
 		FROM channels
 		WHERE domain_id = ?
-		ORDER BY CASE WHEN channel_type = 'text' THEN 0 ELSE 1 END, position ASC, id ASC
+		ORDER BY CASE
+			WHEN channel_type = 'text' THEN 0
+			WHEN channel_type = 'screening' THEN 1
+			ELSE 2
+		END, position ASC, id ASC
 		LIMIT 1
 	`, domainID)
 

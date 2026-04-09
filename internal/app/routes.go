@@ -19,6 +19,7 @@ func RegisterRoutes(router *gin.Engine, application *App, hub *realtime.Hub) {
 	router.POST("/api/auth/register", handler.Register)
 	router.POST("/api/auth/login", handler.Login)
 	router.GET("/api/auth/me", handler.Me)
+	router.POST("/api/screening/resolve", handler.ResolveScreeningURL)
 	router.POST("/api/users/guest", handler.CreateGuestUser)
 	router.GET("/api/bootstrap", handler.Bootstrap)
 	router.GET("/api/domains/:domainId", handler.GetDomain)
