@@ -1,0 +1,82 @@
+name: Deploy Oopz
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - codex/local-checkpoint-20260403
+
+concurrency:
+  group: deploy-oopz-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Test backend
+        run: go test ./...
+
+      - name: Build frontend
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+
+      - name: Build backend
+        run: |
+          mkdir -p release
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o release/oopz-live-linux-amd64 ./cmd/server
+
+      - name: Prepare remote directories
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          port: ${{ secrets.SERVER_PORT }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          script: |
+            mkdir -p "${{ secrets.SERVER_DEPLOY_PATH }}/release"
+            mkdir -p "${{ secrets.SERVER_DEPLOY_PATH }}/frontend"
+
+      - name: Upload backend binary and frontend dist
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          port: ${{ secrets.SERVER_PORT }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          source: "release/oopz-live-linux-amd64,frontend/dist"
+          target: ${{ secrets.SERVER_DEPLOY_PATH }}
+          overwrite: true
+          strip_components: 0
+
+      - name: Restart oopz-live service
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          port: ${{ secrets.SERVER_PORT }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          script: |
+            chmod +x "${{ secrets.SERVER_DEPLOY_PATH }}/release/oopz-live-linux-amd64"
+            sudo systemctl restart oopz-live
+            sudo systemctl status oopz-live --no-pager
+            curl -fsS http://127.0.0.1:18080/healthz
