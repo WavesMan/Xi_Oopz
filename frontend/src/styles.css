@@ -696,6 +696,14 @@ button {
   line-height: 1.2;
 }
 
+.voice-orb__diagnostics {
+  display: block;
+  margin-top: 2px;
+  color: #78d8c8;
+  font-size: 0.72rem;
+  line-height: 1.2;
+}
+
 .voice-orb__avatar {
   width: 58px;
   height: 58px;
@@ -2001,6 +2009,14 @@ body {
 .member-row__content span {
   font-size: 0.8rem;
   color: #68bfe2;
+}
+
+.member-row__diagnostics {
+  display: block;
+  margin-top: 4px;
+  font-size: 0.74rem;
+  color: #78d8c8;
+  line-height: 1.25;
 }
 
 .member-role-badge {

@@ -134,6 +134,13 @@ export type RemoteMedia = {
   screenStream: MediaStream | null;
 };
 
+export type PeerConnectionDiagnostics = {
+  userId: number;
+  latencyMs: number | null;
+  transport: "lan" | "stun" | "turn" | "unknown";
+  updatedAt: number;
+};
+
 export type AuthResponse = {
   token: string;
   user: User;

@@ -11,6 +11,7 @@ import type {
   DomainMember,
   Message,
   OnlineUserPresence,
+  PeerConnectionDiagnostics,
   PresenceMember,
   RemoteMedia,
   ScreeningPlaylistItem,
@@ -147,6 +148,19 @@ function isLikelyLiveScreeningURL(value?: string | null) {
   );
 }
 
+function formatPeerDiagnostics(diagnostics: PeerConnectionDiagnostics) {
+  const transportText =
+    diagnostics.transport === "turn"
+      ? "TURN"
+      : diagnostics.transport === "stun"
+        ? "STUN"
+        : diagnostics.transport === "lan"
+          ? "局域网"
+          : "未知";
+  const latencyText = diagnostics.latencyMs != null ? `${diagnostics.latencyMs}ms` : "--";
+  return `${transportText} · ${latencyText}`;
+}
+
 function escapeHTML(value: string) {
   return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
 }
@@ -171,6 +185,7 @@ export function App() {
   const deferredMessages = useDeferredValue(messages);
   const [voiceMembers, setVoiceMembers] = useState<Map<number, PresenceMember>>(new Map());
   const [remoteMedia, setRemoteMedia] = useState<Map<number, RemoteMedia>>(new Map());
+  const [peerDiagnostics, setPeerDiagnostics] = useState<Map<number, PeerConnectionDiagnostics>>(new Map());
   const [onlineCounts, setOnlineCounts] = useState<Record<string, number>>({});
   const [onlineUsers, setOnlineUsers] = useState<Map<number, OnlineUserPresence>>(new Map());
   const [voiceChannelMembers, setVoiceChannelMembers] = useState<Record<string, PresenceMember[]>>({});
@@ -551,11 +566,12 @@ export function App() {
       () => voiceMembersRef.current,
       () => iceServersRef.current,
       (media) => setRemoteMedia(new Map(media)),
+      (diagnostics) => setPeerDiagnostics(new Map(diagnostics)),
       (stream) => setLocalAudioStream(stream),
       (stream) => setLocalScreenStream(stream),
-      (message) => {
+      (kind, title, message) => {
         setStatus(message);
-        pushNotice("error", "实时通信异常", message);
+        pushNotice(kind, title, message);
       },
     );
     void rtcRef.current.setAudioInputDevice(selectedAudioInputId);
@@ -565,6 +581,7 @@ export function App() {
       socket.close();
       socketRef.current = null;
       rtcRef.current = null;
+      setPeerDiagnostics(new Map());
     };
   }, [session?.token, user?.id, bootstrap?.domain.id]);
 
@@ -849,6 +866,7 @@ export function App() {
     setMessages([]);
     setVoiceMembers(new Map());
     setRemoteMedia(new Map());
+    setPeerDiagnostics(new Map());
     setOnlineCounts({});
     setOnlineUsers(new Map());
     setVoiceChannelMembers({});
@@ -1877,6 +1895,7 @@ export function App() {
                     micEnabled={member.user.id === user?.id ? micEnabled : member.micEnabled}
                     screenSharing={member.screenSharing}
                     isCurrentUser={member.user.id === user?.id}
+                    diagnostics={peerDiagnostics.get(member.user.id)}
                   />
                 ))
               ) : (
@@ -2079,6 +2098,7 @@ export function App() {
               currentUserId={user?.id || 0}
               currentUserMicEnabled={micEnabled}
               showVoiceState
+              peerDiagnostics={peerDiagnostics}
             />
           ) : null}
           <MemberSection
@@ -2087,6 +2107,7 @@ export function App() {
             voiceMembers={voiceMembers}
             onlineUsers={onlineUsers}
             channelNameById={channelNameById}
+            peerDiagnostics={peerDiagnostics}
           />
           <MemberSection
             title="离线"
@@ -2094,6 +2115,7 @@ export function App() {
             voiceMembers={voiceMembers}
             onlineUsers={onlineUsers}
             channelNameById={channelNameById}
+            peerDiagnostics={peerDiagnostics}
           />
         </div>
       </aside>
@@ -2641,6 +2663,7 @@ function MemberSection({
   currentUserId = 0,
   currentUserMicEnabled = true,
   showVoiceState = false,
+  peerDiagnostics,
 }: {
   title: string;
   members: DomainMember[];
@@ -2653,6 +2676,7 @@ function MemberSection({
   currentUserId?: number;
   currentUserMicEnabled?: boolean;
   showVoiceState?: boolean;
+  peerDiagnostics: Map<number, PeerConnectionDiagnostics>;
 }) {
   const sortedMembers = [...members].sort((left, right) => {
     if (left.role !== right.role) {
@@ -2683,6 +2707,7 @@ function MemberSection({
               currentUserId={currentUserId}
               currentUserMicEnabled={currentUserMicEnabled}
               showVoiceState={showVoiceState}
+              diagnostics={peerDiagnostics.get(member.id)}
             />
           );
         })
@@ -2703,6 +2728,7 @@ function MemberRowItem({
   currentUserId,
   currentUserMicEnabled,
   showVoiceState,
+  diagnostics,
 }: {
   member: DomainMember;
   presence?: PresenceMember;
@@ -2713,6 +2739,7 @@ function MemberRowItem({
   currentUserId: number;
   currentUserMicEnabled: boolean;
   showVoiceState: boolean;
+  diagnostics?: PeerConnectionDiagnostics;
 }) {
   const stream =
     member.id === currentUserId ? localAudioStream : remoteMedia?.get(member.id)?.audioStream || null;
@@ -2740,6 +2767,7 @@ function MemberRowItem({
                   : `域 ${online.domainId} · 在线`
                 : "离线"}
         </span>
+        {diagnostics ? <span className="member-row__diagnostics">{formatPeerDiagnostics(diagnostics)}</span> : null}
       </div>
     </div>
   );
@@ -2753,6 +2781,7 @@ function VoiceAvatarOrb({
   micEnabled,
   screenSharing,
   isCurrentUser,
+  diagnostics,
 }: {
   user: User;
   stream: MediaStream | null;
@@ -2761,6 +2790,7 @@ function VoiceAvatarOrb({
   micEnabled: boolean;
   screenSharing: boolean;
   isCurrentUser: boolean;
+  diagnostics?: PeerConnectionDiagnostics;
 }) {
   const speaking = useSpeakingState(stream, micEnabled);
   const previewRef = useRef<HTMLDivElement | null>(null);
@@ -2847,6 +2877,7 @@ function VoiceAvatarOrb({
               ? "麦克风开启"
               : "已静音"}
       </span>
+      {diagnostics ? <span className="voice-orb__diagnostics">{formatPeerDiagnostics(diagnostics)}</span> : null}
     </div>
   );
 }
