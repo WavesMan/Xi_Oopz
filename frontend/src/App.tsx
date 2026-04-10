@@ -1063,11 +1063,6 @@ export function App() {
     screeningJoinDedupRef.current = { channelId: null, until: 0 };
     setScreeningSnapshot(null);
     setScreeningJoinEpoch((value) => value + 1);
-    setScreeningChannelMembers((prev) => {
-      const next = { ...prev };
-      delete next[String(leavingChannel.id)];
-      return next;
-    });
     setActiveChannel(nextActive);
     await Promise.resolve();
     if (currentVoiceChannelIdRef.current) {
