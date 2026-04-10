@@ -51,21 +51,6 @@ export async function sendVerificationCode(input: { email: string }): Promise<{ 
   return response.json();
 }
 
-export async function resolveScreeningUrl(
-  token: string,
-  input: { url: string },
-): Promise<{ source: string; resolvedUrl: string; bvid: string; cid: number; page: number }> {
-  const response = await fetch("/api/screening/resolve", {
-    method: "POST",
-    headers: { ...JSON_HEADERS, ...authHeaders(token) },
-    body: JSON.stringify(input),
-  });
-  if (!response.ok) {
-    throw new Error((await response.json()).error || "视频地址解析失败");
-  }
-  return response.json();
-}
-
 export async function loginAccount(input: {
   email: string;
   password: string;

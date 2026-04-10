@@ -1,6 +1,6 @@
 import { startTransition, useDeferredValue, useEffect, useRef, useState } from "react";
 
-import { createCategory, createChannel, createDomain, fetchBootstrap, fetchChannelMessages, fetchDomainPresence, fetchMe, loginAccount, registerAccount, resolveScreeningUrl, sendVerificationCode } from "./api";
+import { createCategory, createChannel, createDomain, fetchBootstrap, fetchChannelMessages, fetchDomainPresence, fetchMe, loginAccount, registerAccount, sendVerificationCode } from "./api";
 import { RTCController, type ScreenAudioMode, type ScreenShareOptions, type ScreenShareSurface } from "./rtc";
 import { soundManager } from "./sound";
 import { SocketClient } from "./socket";
@@ -1885,7 +1885,6 @@ export function App() {
             channel={activeScreeningChannel}
             snapshot={screeningSnapshot}
             currentUser={user}
-            authToken={session?.token || null}
             joinEpoch={screeningJoinEpoch}
             urlInput={screeningUrlInput}
             titleInput={screeningTitleInput}
@@ -1919,7 +1918,6 @@ export function App() {
                 ...payload,
               })
             }
-            onInfo={showInfo}
             onError={(title, message) => pushNotice("error", title, message)}
           />
         ) : null}
@@ -2228,7 +2226,6 @@ function ScreeningRoomPanel({
   channel,
   snapshot,
   currentUser,
-  authToken,
   joinEpoch,
   urlInput,
   titleInput,
@@ -2237,13 +2234,11 @@ function ScreeningRoomPanel({
   onReplace,
   onAppend,
   onPlaybackEvent,
-  onInfo,
   onError,
 }: {
   channel: Channel;
   snapshot: ScreeningSnapshot | null;
   currentUser: User | null;
-  authToken: string | null;
   joinEpoch: number;
   urlInput: string;
   titleInput: string;
@@ -2252,7 +2247,6 @@ function ScreeningRoomPanel({
   onReplace: (input: { url: string; title: string }) => void;
   onAppend: (input: { url: string; title: string }) => void;
   onPlaybackEvent: (type: string, payload: { itemId?: string; currentTime: number; playbackRate: number }) => void;
-  onInfo: (title: string, message: string) => void;
   onError: (title: string, message: string) => void;
 }) {
   const playerRef = useRef<ScreeningPlayerElement | null>(null);
@@ -2260,7 +2254,6 @@ function ScreeningRoomPanel({
   const lastLoadedItemRef = useRef<string>("");
   const lastAppliedJoinEpochRef = useRef(-1);
   const previousControllerRef = useRef(false);
-  const [resolvingURL, setResolvingURL] = useState(false);
 
   const state = snapshot?.state || null;
   const viewers = snapshot?.viewers || [];
@@ -2351,7 +2344,21 @@ function ScreeningRoomPanel({
     const player = playerRef.current;
     if (!player) return;
 
+    const logPlayerEvent = (eventName: string, extra?: Record<string, unknown>) => {
+      console.info(`[screening-ui][${new Date().toISOString()}] screening:player:${eventName}`, {
+        channelId: state?.channelId || channel.id,
+        itemId: state?.currentItemId || "",
+        currentUrl: state?.currentUrl || player.src || "",
+        playbackState: state?.playbackState || "idle",
+        currentTime: Number.isFinite(player.currentTime) ? player.currentTime : null,
+        paused: player.paused,
+        playbackRate: player.playbackRate || 1,
+        ...extra,
+      });
+    };
+
     const handleCanPlay = () => {
+      logPlayerEvent("can-play");
       if (!isController || !state?.awaitingReady || !state.currentItemId) return;
       onPlaybackEvent("screening.controller.ready", {
         itemId: state.currentItemId,
@@ -2360,6 +2367,7 @@ function ScreeningRoomPanel({
       });
     };
     const handlePlay = () => {
+      logPlayerEvent("play");
       if (!isController || !state?.currentItemId) return;
       onPlaybackEvent("screening.play", {
         itemId: state.currentItemId,
@@ -2368,6 +2376,7 @@ function ScreeningRoomPanel({
       });
     };
     const handlePause = () => {
+      logPlayerEvent("pause");
       if (!isController || !state?.currentItemId || state.playbackState === "loading") return;
       onPlaybackEvent("screening.pause", {
         itemId: state.currentItemId,
@@ -2376,6 +2385,7 @@ function ScreeningRoomPanel({
       });
     };
     const handleSeeked = () => {
+      logPlayerEvent("seeked");
       if (!isController || !state?.currentItemId) return;
       onPlaybackEvent("screening.seek", {
         itemId: state.currentItemId,
@@ -2384,6 +2394,7 @@ function ScreeningRoomPanel({
       });
     };
     const handleRateChange = () => {
+      logPlayerEvent("rate-change");
       if (!isController || !state?.currentItemId) return;
       onPlaybackEvent("screening.rate", {
         itemId: state.currentItemId,
@@ -2392,6 +2403,7 @@ function ScreeningRoomPanel({
       });
     };
     const handleEnded = () => {
+      logPlayerEvent("ended");
       if (!isController || !state?.currentItemId) return;
       onPlaybackEvent("screening.item.ended", {
         itemId: state.currentItemId,
@@ -2399,23 +2411,66 @@ function ScreeningRoomPanel({
         playbackRate: player.playbackRate || 1,
       });
     };
+    const handleLoadedMetadata = () => {
+      logPlayerEvent("loaded-metadata", {
+        duration: typeof player.duration === "number" && Number.isFinite(player.duration) ? player.duration : null,
+      });
+    };
+    const handleCanPlayThrough = () => {
+      logPlayerEvent("can-play-through");
+    };
+    const handleWaiting = () => {
+      logPlayerEvent("waiting");
+    };
+    const handleStalled = () => {
+      logPlayerEvent("stalled");
+    };
+    const handleSeeking = () => {
+      logPlayerEvent("seeking");
+    };
+    const handleError = (event: Event) => {
+      const playerWithError = player as HTMLElement & {
+        error?: { code?: number; message?: string } | null;
+        networkState?: number;
+        readyState?: number;
+      };
+      logPlayerEvent("error", {
+        eventType: event.type,
+        errorCode: playerWithError.error?.code ?? null,
+        errorMessage: playerWithError.error?.message ?? null,
+        networkState: playerWithError.networkState ?? null,
+        readyState: playerWithError.readyState ?? null,
+      });
+    };
 
     player.addEventListener("can-play", handleCanPlay);
+    player.addEventListener("can-play-through", handleCanPlayThrough);
+    player.addEventListener("loaded-metadata", handleLoadedMetadata);
     player.addEventListener("play", handlePlay);
     player.addEventListener("pause", handlePause);
+    player.addEventListener("waiting", handleWaiting);
+    player.addEventListener("stalled", handleStalled);
+    player.addEventListener("seeking", handleSeeking);
     player.addEventListener("seeked", handleSeeked);
     player.addEventListener("rate-change", handleRateChange);
     player.addEventListener("end", handleEnded);
+    player.addEventListener("error", handleError);
 
     return () => {
       player.removeEventListener("can-play", handleCanPlay);
+      player.removeEventListener("can-play-through", handleCanPlayThrough);
+      player.removeEventListener("loaded-metadata", handleLoadedMetadata);
       player.removeEventListener("play", handlePlay);
       player.removeEventListener("pause", handlePause);
+      player.removeEventListener("waiting", handleWaiting);
+      player.removeEventListener("stalled", handleStalled);
+      player.removeEventListener("seeking", handleSeeking);
       player.removeEventListener("seeked", handleSeeked);
       player.removeEventListener("rate-change", handleRateChange);
       player.removeEventListener("end", handleEnded);
+      player.removeEventListener("error", handleError);
     };
-  }, [isController, onPlaybackEvent, state]);
+  }, [channel.id, isController, onPlaybackEvent, state]);
 
   useEffect(() => {
     const becameController = isController && !previousControllerRef.current;
@@ -2440,44 +2495,13 @@ function ScreeningRoomPanel({
     return () => window.clearTimeout(timer);
   }, [isController, onPlaybackEvent, state]);
 
-  function isBilibiliVideoURL(value: string) {
-    try {
-      const parsed = new URL(value);
-      return /(^|\.)bilibili\.com$/i.test(parsed.hostname) && /\/video\//.test(parsed.pathname) && /BV[0-9A-Za-z]+/.test(value);
-    } catch {
-      return false;
-    }
-  }
-
   async function prepareSubmissionInput() {
     const url = urlInput.trim();
     if (!url) {
       onError("放映室操作失败", "请输入可直接播放的视频 URL");
       return null;
     }
-
-    const title = titleInput.trim();
-    if (!isBilibiliVideoURL(url)) {
-      return { url, title };
-    }
-    if (!authToken) {
-      onError("B 站地址解析失败", "当前登录状态无效，无法解析 B 站视频地址");
-      return null;
-    }
-
-    setResolvingURL(true);
-    try {
-      const resolved = await resolveScreeningUrl(authToken, { url });
-      onUrlInputChange(resolved.resolvedUrl);
-      onInfo("B 站地址解析成功", "已将页面地址转换为可播放直链，本次操作会使用解析后的地址。");
-      return { url: resolved.resolvedUrl, title };
-    } catch (error) {
-      const message = error instanceof Error && error.message.trim() ? error.message : "无法将该 B 站视频地址转换为直链";
-      onError("B 站地址解析失败", message);
-      return null;
-    } finally {
-      setResolvingURL(false);
-    }
+    return { url, title: titleInput.trim() };
   }
 
   return (
@@ -2530,7 +2554,6 @@ function ScreeningRoomPanel({
         <div className="screening-composer__actions">
           <button
             className="action-pill"
-            disabled={resolvingURL}
             onClick={() => {
               void (async () => {
                 const next = await prepareSubmissionInput();
@@ -2539,11 +2562,10 @@ function ScreeningRoomPanel({
               })();
             }}
           >
-            {resolvingURL ? "解析中..." : "替换当前并开始"}
+            替换当前并开始
           </button>
           <button
             className="action-pill"
-            disabled={resolvingURL}
             onClick={() => {
               void (async () => {
                 const next = await prepareSubmissionInput();
@@ -2552,7 +2574,7 @@ function ScreeningRoomPanel({
               })();
             }}
           >
-            {resolvingURL ? "解析中..." : "加入播放列表"}
+            加入播放列表
           </button>
         </div>
       </div>
