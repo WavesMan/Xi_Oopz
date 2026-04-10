@@ -452,7 +452,9 @@ button {
 
 .screening-stage__video-wrap {
   position: relative;
-  display: block;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   width: 100%;
   aspect-ratio: 16 / 9;
   min-height: 0;
@@ -484,8 +486,17 @@ button {
   height: 100%;
 }
 
+.screening-stage__player media-outlet,
+.screening-stage__player [data-media-provider] {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #000;
+}
+
 .screening-stage__player video {
-  object-fit: cover;
+  object-fit: contain;
+  background: #000;
 }
 
 .screening-stage__empty {
