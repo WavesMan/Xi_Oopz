@@ -675,10 +675,42 @@ func (h *Hub) updateScreeningPlayback(client *Client, eventType string, payload 
 		return err
 	}
 	now := time.Now().UTC()
+	isLive := isLikelyLiveScreeningURL(state.CurrentURL)
 	if payload.ItemID != "" && state.CurrentItemID != "" && payload.ItemID != state.CurrentItemID {
 		return nil
 	}
 	state.ControllerUserID = client.user.ID
+
+	if isLive {
+		state.CurrentTime = 0
+		state.PlaybackRate = 1
+		state.UpdatedAt = now
+		switch eventType {
+		case "screening.play":
+			state.PlaybackState = "playing"
+			state.AwaitingReady = false
+			state.StartedAt = time.Time{}
+		case "screening.pause":
+			state.PlaybackState = "paused"
+		case "screening.seek", "screening.tick", "screening.rate":
+			return nil
+		}
+		if readyOnly {
+			state.PlaybackState = "playing"
+			state.AwaitingReady = false
+			state.CurrentTime = 0
+			state.StartedAt = time.Time{}
+			if err := h.markScreeningViewerReady(payload.ChannelID, client.user.ID); err != nil {
+				return err
+			}
+		}
+		if err := h.saveScreeningState(payload.ChannelID, state); err != nil {
+			return err
+		}
+		h.broadcastToScreening(payload.ChannelID, eventType, state, nil)
+		return nil
+	}
+
 	state.CurrentTime = payload.CurrentTime
 	if payload.PlaybackRate > 0 {
 		state.PlaybackRate = payload.PlaybackRate
@@ -721,6 +753,18 @@ func (h *Hub) updateScreeningPlayback(client *Client, eventType string, payload 
 	}
 	h.broadcastToScreening(payload.ChannelID, eventType, state, nil)
 	return nil
+}
+
+func isLikelyLiveScreeningURL(raw string) bool {
+	value := strings.TrimSpace(strings.ToLower(raw))
+	if value == "" {
+		return false
+	}
+	return strings.Contains(value, "live.bilibili.com") ||
+		strings.Contains(value, ".m3u8") ||
+		strings.Contains(value, ".flv") ||
+		strings.Contains(value, "stream=live") ||
+		strings.Contains(value, "livestream")
 }
 
 func (h *Hub) advanceScreeningPlaylist(client *Client, channelID int64) error {

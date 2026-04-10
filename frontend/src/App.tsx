@@ -135,6 +135,18 @@ function formatTime(value: string) {
   return `${date.getFullYear()}年 ${date.getMonth() + 1}月 ${date.getDate()}日 ${timeText}`;
 }
 
+function isLikelyLiveScreeningURL(value?: string | null) {
+  const raw = (value || "").trim().toLowerCase();
+  if (!raw) return false;
+  return (
+    raw.includes("live.bilibili.com") ||
+    raw.includes(".m3u8") ||
+    raw.includes(".flv") ||
+    raw.includes("stream=live") ||
+    raw.includes("livestream")
+  );
+}
+
 function escapeHTML(value: string) {
   return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
 }
@@ -2259,6 +2271,7 @@ function ScreeningRoomPanel({
   const viewers = snapshot?.viewers || [];
   const isController = Boolean(currentUser && state && state.controllerUserId === currentUser.id);
   const controllerName = viewers.find((item) => item.user.id === state?.controllerUserId)?.user.displayName || "当前主持人";
+  const isLiveScreening = isLikelyLiveScreeningURL(state?.currentUrl);
 
   useEffect(() => {
     const player = playerRef.current;
@@ -2295,6 +2308,16 @@ function ScreeningRoomPanel({
     const player = playerRef.current;
     if (!player || !state || !state.currentItemId) return;
 
+    if (isLiveScreening) {
+      if (state.playbackState === "playing" && player.paused) {
+        void player.play().catch(() => undefined);
+      }
+      if ((state.playbackState === "paused" || state.playbackState === "loading" || state.playbackState === "ended" || state.playbackState === "idle") && !player.paused) {
+        void player.pause().catch(() => undefined);
+      }
+      return;
+    }
+
     const elapsed = state.playbackState === "playing" && state.updatedAt ? Math.max(0, (Date.now() - new Date(state.updatedAt).getTime()) / 1000) : 0;
     const targetTime = state.playbackState === "playing" ? state.currentTime + elapsed * (state.playbackRate || 1) : state.currentTime;
     if (state.playbackRate > 0 && Math.abs(player.playbackRate - state.playbackRate) > 0.01) {
@@ -2313,14 +2336,14 @@ function ScreeningRoomPanel({
     if ((state.playbackState === "paused" || state.playbackState === "loading" || state.playbackState === "ended" || state.playbackState === "idle") && !player.paused) {
       void player.pause().catch(() => undefined);
     }
-  }, [state]);
+  }, [isLiveScreening, state]);
 
   useEffect(() => {
     if (tickTimerRef.current) {
       window.clearInterval(tickTimerRef.current);
       tickTimerRef.current = null;
     }
-    if (!isController || !state || state.playbackState !== "playing") {
+    if (!isController || !state || state.playbackState !== "playing" || isLiveScreening) {
       return;
     }
     tickTimerRef.current = window.setInterval(() => {
@@ -2338,7 +2361,7 @@ function ScreeningRoomPanel({
         tickTimerRef.current = null;
       }
     };
-  }, [isController, onPlaybackEvent, state]);
+  }, [isController, isLiveScreening, onPlaybackEvent, state]);
 
   useEffect(() => {
     const player = playerRef.current;
@@ -2385,6 +2408,7 @@ function ScreeningRoomPanel({
       });
     };
     const handleSeeked = () => {
+      if (isLiveScreening) return;
       logPlayerEvent("seeked");
       if (!isController || !state?.currentItemId) return;
       onPlaybackEvent("screening.seek", {
@@ -2394,6 +2418,7 @@ function ScreeningRoomPanel({
       });
     };
     const handleRateChange = () => {
+      if (isLiveScreening) return;
       logPlayerEvent("rate-change");
       if (!isController || !state?.currentItemId) return;
       onPlaybackEvent("screening.rate", {
@@ -2493,7 +2518,7 @@ function ScreeningRoomPanel({
       onPlaybackEvent(player.paused ? "screening.pause" : "screening.tick", payload);
     }, 180);
     return () => window.clearTimeout(timer);
-  }, [isController, onPlaybackEvent, state]);
+  }, [isController, isLiveScreening, onPlaybackEvent, state]);
 
   async function prepareSubmissionInput() {
     const url = urlInput.trim();
@@ -2533,7 +2558,7 @@ function ScreeningRoomPanel({
             src={state?.currentUrl || undefined}
             title={state?.currentTitle || channel.name}
             viewType="video"
-            streamType="on-demand"
+            streamType={isLiveScreening ? "live" : "on-demand"}
             load="visible"
             preload="auto"
             playsinline
