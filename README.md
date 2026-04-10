@@ -11,6 +11,7 @@
 
 ## 使用截图
 <img width="1280" height="680" alt="a956294c2b584c2b0df1248c22b35649" src="https://github.com/user-attachments/assets/3e9051fe-62ee-4fb0-9175-91465b61830b" />
+<img width="3420" height="1994" alt="a60c9321fbbc31e666af0bc13dabc1a7" src="https://github.com/user-attachments/assets/ac233fb8-e756-4409-93c0-b516ed5be058" />
 
 
 ## 在线能力
@@ -36,7 +37,7 @@
 - 缓存 / 在线状态：Redis
 - 实时音视频：浏览器 WebRTC Mesh
 
-## 项目截图与交互方向
+## 项目交互方向
 
 当前 UI 以桌面端频道社交产品为目标，重点参考 Discord / Oopz 这类布局：
 
