@@ -369,7 +369,7 @@ func (h *Hub) Handle(client *Client, raw []byte) {
 		if err := h.advanceScreeningPlaylist(client, payload.ChannelID); err != nil {
 			client.sendJSON("error", map[string]string{"message": err.Error()})
 		}
-	case "rtc.offer", "rtc.answer", "rtc.ice_candidate", "screen.sync_request", "media.sync_request":
+	case "rtc.offer", "rtc.answer", "rtc.ice_candidate", "rtc.reset", "screen.sync_request", "media.sync_request":
 		var payload RTCSignalPayload
 		if err := json.Unmarshal(envelope.Payload, &payload); err != nil {
 			client.sendJSON("error", map[string]string{"message": "invalid rtc payload"})

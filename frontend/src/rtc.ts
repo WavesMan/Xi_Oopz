@@ -14,6 +14,9 @@ type PeerWrapper = {
   audioTransceiver: RTCRtpTransceiver;
   displayAudioTransceiver: RTCRtpTransceiver;
   screenTransceiver: RTCRtpTransceiver;
+  reconnectAttempts: number;
+  reconnectTimer: number | null;
+  reconnecting: boolean;
 };
 
 type SignalPayload = {
@@ -22,6 +25,7 @@ type SignalPayload = {
   sdp?: string;
   candidate?: string;
   kind?: "audio" | "screen";
+  reason?: string;
 };
 
 type MediaSyncKind = "audio" | "screen";
@@ -53,6 +57,10 @@ const RTC_DEBUG_LABELS = new Set([
   "track:received",
   "negotiate:start",
   "negotiate:offer-sent",
+  "reconnect:scheduled",
+  "reconnect:ice-restart",
+  "reconnect:recreate",
+  "reconnect:reset-received",
   "signal:offer:ignored",
   "signal:answer:ignored",
   "signal:error",
@@ -62,6 +70,8 @@ export class RTCController {
   private static readonly MEDIA_RECONNECT_DELAY_MS = 1500;
   private static readonly MEDIA_RECONNECT_MAX_ATTEMPTS = 5;
   private static readonly PEER_DISCONNECT_GRACE_MS = 5000;
+  private static readonly PEER_RECONNECT_DELAY_MS = 2000;
+  private static readonly PEER_RECONNECT_MAX_ATTEMPTS = 4;
 
   private localAudioStream: MediaStream | null = null;
   private localScreenStream: MediaStream | null = null;
@@ -288,21 +298,19 @@ export class RTCController {
   }
 
   handleMemberLeft(userId: number) {
-    this.clearMediaReconnect(userId, "audio");
-    this.clearMediaReconnect(userId, "screen");
-    this.clearPeerDisconnectTimer(userId);
-    const wrapper = this.peers.get(userId);
-    if (!wrapper) return;
-    wrapper.pc.close();
-    this.peers.delete(userId);
-    this.remoteMedia.delete(userId);
-    this.onMediaChanged(new Map(this.remoteMedia));
+    this.destroyPeer(userId);
   }
 
   async handleSignal(type: string, payload: SignalPayload) {
     try {
       const peerUser = this.lookupUser(payload.sourceUserId);
       if (!peerUser) return;
+
+      if (type === "rtc.reset") {
+        this.log("reconnect:reset-received", { userId: peerUser.id, reason: payload.reason || "remote-reset" });
+        await this.recreatePeer(peerUser.id, payload.reason || "remote-reset", false);
+        return;
+      }
 
       const wrapper = await this.ensurePeer(peerUser, false);
 
@@ -558,11 +566,16 @@ export class RTCController {
   private async ensurePeer(user: User, initialOfferOwner: boolean) {
     const existing = this.peers.get(user.id);
     if (existing) {
-      if (initialOfferOwner) {
-        existing.initialOfferOwner = true;
-        await this.bindLocalTracks(existing, true);
+      if (["failed", "closed"].includes(existing.pc.connectionState)) {
+        this.destroyPeer(user.id);
+      } else {
+        this.clearPeerReconnect(existing);
+        if (initialOfferOwner) {
+          existing.initialOfferOwner = true;
+          await this.bindLocalTracks(existing, true);
+        }
+        return existing;
       }
-      return existing;
     }
 
     const currentUser = this.getCurrentUser();
@@ -593,6 +606,9 @@ export class RTCController {
       audioTransceiver,
       displayAudioTransceiver,
       screenTransceiver,
+      reconnectAttempts: 0,
+      reconnectTimer: null,
+      reconnecting: false,
     };
 
     pc.addEventListener("negotiationneeded", () => {
@@ -665,8 +681,24 @@ export class RTCController {
       this.onMediaChanged(new Map(this.remoteMedia));
     });
 
+    pc.addEventListener("iceconnectionstatechange", () => {
+      if (pc.iceConnectionState === "connected" || pc.iceConnectionState === "completed") {
+        this.clearPeerReconnect(wrapper);
+        this.clearPeerDisconnectTimer(user.id);
+        return;
+      }
+      if (pc.iceConnectionState === "disconnected") {
+        this.schedulePeerReconnect(user.id, RTCController.PEER_RECONNECT_DELAY_MS, "ice-disconnected");
+        return;
+      }
+      if (pc.iceConnectionState === "failed") {
+        this.schedulePeerReconnect(user.id, 0, "ice-failed");
+      }
+    });
+
     pc.addEventListener("connectionstatechange", () => {
       if (pc.connectionState === "connected") {
+        this.clearPeerReconnect(wrapper);
         this.clearPeerDisconnectTimer(user.id);
         return;
       }
@@ -674,9 +706,14 @@ export class RTCController {
         this.schedulePeerDisconnectCleanup(user.id);
         this.ensureMediaFlow(user.id, "audio", "peer-disconnected");
         this.ensureMediaFlow(user.id, "screen", "peer-disconnected");
+        this.schedulePeerReconnect(user.id, RTCController.PEER_RECONNECT_DELAY_MS, "peer-disconnected");
         return;
       }
-      if (["failed", "closed"].includes(pc.connectionState)) {
+      if (pc.connectionState === "failed") {
+        this.schedulePeerReconnect(user.id, 0, "peer-failed");
+        return;
+      }
+      if (pc.connectionState === "closed") {
         this.handleMemberLeft(user.id);
       }
     });
@@ -768,6 +805,7 @@ export class RTCController {
       this.clearPeerDisconnectTimer(userId);
     }
     for (const wrapper of this.peers.values()) {
+      this.clearPeerReconnect(wrapper);
       wrapper.pc.close();
     }
     this.peers.clear();
@@ -886,5 +924,117 @@ export class RTCController {
 
   private mediaReconnectKey(userId: number, kind: MediaSyncKind) {
     return `${userId}:${kind}`;
+  }
+
+  private clearPeerReconnect(wrapper: PeerWrapper) {
+    if (wrapper.reconnectTimer) {
+      window.clearTimeout(wrapper.reconnectTimer);
+      wrapper.reconnectTimer = null;
+    }
+    wrapper.reconnectAttempts = 0;
+    wrapper.reconnecting = false;
+  }
+
+  private schedulePeerReconnect(userId: number, delayMs: number, reason: string) {
+    const wrapper = this.peers.get(userId);
+    if (!wrapper || wrapper.reconnecting) {
+      return;
+    }
+    if (wrapper.reconnectTimer) {
+      return;
+    }
+    wrapper.reconnectTimer = window.setTimeout(() => {
+      wrapper.reconnectTimer = null;
+      void this.attemptPeerReconnect(userId, reason);
+    }, delayMs);
+    this.log("reconnect:scheduled", { userId, delayMs, reason, attempt: wrapper.reconnectAttempts + 1 });
+  }
+
+  private async attemptPeerReconnect(userId: number, reason: string) {
+    const wrapper = this.peers.get(userId);
+    if (!wrapper || !this.getCurrentVoiceChannelId()) {
+      return;
+    }
+    if (wrapper.pc.connectionState === "closed") {
+      return;
+    }
+
+    wrapper.reconnectAttempts += 1;
+    wrapper.reconnecting = true;
+    const attempt = wrapper.reconnectAttempts;
+
+    try {
+      if (
+        attempt < RTCController.PEER_RECONNECT_MAX_ATTEMPTS &&
+        wrapper.pc.signalingState === "stable" &&
+        !wrapper.makingOffer
+      ) {
+        const offer = await wrapper.pc.createOffer({ iceRestart: true });
+        await wrapper.pc.setLocalDescription(offer);
+        this.socket.send("rtc.offer", {
+          channelId: this.getCurrentVoiceChannelId(),
+          targetUserId: wrapper.user.id,
+          sdp: wrapper.pc.localDescription?.sdp,
+        });
+        this.log("reconnect:ice-restart", { userId: wrapper.user.id, attempt, reason });
+        wrapper.reconnecting = false;
+        this.schedulePeerReconnect(userId, RTCController.PEER_RECONNECT_DELAY_MS, "ice-restart-timeout");
+        return;
+      }
+
+      await this.recreatePeer(userId, reason, true);
+    } catch (error) {
+      console.error(error);
+      wrapper.reconnecting = false;
+      if (attempt >= RTCController.PEER_RECONNECT_MAX_ATTEMPTS) {
+        await this.recreatePeer(userId, "reconnect-max-attempts", true);
+        return;
+      }
+      this.schedulePeerReconnect(userId, RTCController.PEER_RECONNECT_DELAY_MS, "reconnect-retry");
+    }
+  }
+
+  private async recreatePeer(userId: number, reason: string, notifyRemote: boolean) {
+    const wrapper = this.peers.get(userId);
+    const user = wrapper?.user || this.lookupUser(userId);
+    const currentUser = this.getCurrentUser();
+    if (!user || !currentUser || !this.getCurrentVoiceChannelId()) {
+      return;
+    }
+
+    this.log("reconnect:recreate", { userId, reason, notifyRemote });
+    this.destroyPeer(userId);
+
+    if (notifyRemote) {
+      this.socket.send("rtc.reset", {
+        channelId: this.getCurrentVoiceChannelId(),
+        targetUserId: userId,
+        reason,
+      });
+    }
+
+    const shouldOffer = currentUser.id < user.id;
+    const nextWrapper = await this.ensurePeer(user, shouldOffer);
+    await this.bindLocalTracks(nextWrapper, true);
+    nextWrapper.reconnecting = false;
+    nextWrapper.reconnectAttempts = 0;
+    if (shouldOffer) {
+      await this.sendOffer(nextWrapper);
+    }
+  }
+
+  private destroyPeer(userId: number) {
+    const wrapper = this.peers.get(userId);
+    if (!wrapper) {
+      return;
+    }
+    this.clearPeerReconnect(wrapper);
+    this.clearPeerDisconnectTimer(userId);
+    this.clearMediaReconnect(userId, "audio");
+    this.clearMediaReconnect(userId, "screen");
+    wrapper.pc.close();
+    this.peers.delete(userId);
+    this.remoteMedia.delete(userId);
+    this.onMediaChanged(new Map(this.remoteMedia));
   }
 }

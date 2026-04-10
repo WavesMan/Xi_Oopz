@@ -63,6 +63,8 @@ type RTCSignalPayload struct {
 	SourceUserID int64  `json:"sourceUserId"`
 	SDP          string `json:"sdp,omitempty"`
 	Candidate    string `json:"candidate,omitempty"`
+	Kind         string `json:"kind,omitempty"`
+	Reason       string `json:"reason,omitempty"`
 }
 
 type ScreeningJoinPayload struct {
