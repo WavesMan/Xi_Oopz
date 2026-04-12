@@ -138,6 +138,15 @@ npm install
 npm run dev
 ```
 
+推荐在本地提交流程中执行：
+
+```bash
+cd frontend
+npm run lint
+npm run format:check
+npm run test:run
+```
+
 开发模式访问：
 
 ```text

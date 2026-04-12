@@ -16,7 +16,7 @@ import "vidstack/styles/ui/captions.css";
 import "vidstack/styles/community-skin/video.css";
 
 import { App } from "./App";
-import "./styles.css";
+import "./styles/index.css";
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
