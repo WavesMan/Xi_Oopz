@@ -1,26 +1,43 @@
 import { startTransition, useDeferredValue, useEffect, useRef, useState } from "react";
 
-import {
-  createCategory,
-  createChannel,
-  createDomain,
-  fetchBootstrap,
-  fetchChannelMessages,
-  fetchDomainPresence,
-  fetchMe,
-  loginAccount,
-  registerAccount,
-  sendVerificationCode,
-} from "../api";
 import { NoticeViewport } from "../components/live/NoticeViewport";
 import { ScreenShareSheet } from "../components/live/ScreenShareSheet";
-import { useSpeakingState } from "../hooks/useSpeakingState";
-import { RTCController, type ScreenAudioMode, type ScreenShareOptions, type ScreenShareSurface } from "../rtc";
-import { clearSession, loadSession, saveSession } from "../services/session";
+import { MemberSection, RemoteAudioLayer, ScreenPreviewModal, VoiceAvatarOrb } from "../components/live/voiceAndMember";
+import { ScreeningPlaylistSection, ScreeningRoomPanel } from "../components/live/screening";
+import {
+  ChatIcon,
+  CopyIcon,
+  DownloadIcon,
+  ExpandIcon,
+  HangupIcon,
+  HashIcon,
+  HomeIcon,
+  HeadphoneIcon,
+  ListIcon,
+  MenuIcon,
+  MicIcon,
+  MicOffIcon,
+  MoreIcon,
+  PhoneIcon,
+  PlayIcon,
+  PlusIcon,
+  ReturnIcon,
+  ScreenOffIcon,
+  ScreenShareIcon,
+  SearchIcon,
+  SendIcon,
+  SmileIcon,
+  TagIcon,
+  VoiceChannelIcon,
+} from "../components/live/icons";
+import { useNoticeDomain } from "../hooks/useNoticeDomain";
+import { useSessionDomain } from "../hooks/useSessionDomain";
+import { RTCController, type ScreenShareOptions } from "../rtc";
+import { liveFacade } from "../services/liveFacade";
+import { loadSession } from "../services/session";
 import { soundManager } from "../sound";
 import { SocketClient } from "../socket";
 import type {
-  AuthResponse,
   BootstrapResponse,
   Channel,
   DomainMember,
@@ -34,52 +51,8 @@ import type {
   ScreeningState,
   User,
 } from "../types";
-import {
-  escapeHTML,
-  formatPeerDiagnostics,
-  formatTime,
-  initials,
-  isLikelyLiveScreeningURL,
-  pickPreferredAudioInputId,
-} from "../utils/live";
-
-type Session = AuthResponse;
-type AuthMode = "login" | "register";
-type ScreenPreview = {
-  key: string;
-  user: User;
-  stream: MediaStream;
-  isLocal: boolean;
-};
-
-type AudioInputOption = {
-  deviceId: string;
-  label: string;
-};
-
-type Notice = {
-  id: number;
-  kind: "error" | "info";
-  title: string;
-  message: string;
-};
-
-type ScreenSharePreset = {
-  surface: ScreenShareSurface;
-  audioMode: ScreenAudioMode;
-};
-
-type ScreeningPlayerElement = HTMLElement & {
-  src?: string;
-  currentTime: number;
-  duration?: number;
-  playbackRate: number;
-  volume?: number;
-  paused: boolean;
-  play: () => Promise<void>;
-  pause: () => Promise<void>;
-  enterFullscreen?: (target?: string) => Promise<void>;
-};
+import type { AudioInputOption, ScreenPreview, ScreenSharePreset, Session } from "../types/live";
+import { escapeHTML, formatTime, initials, pickPreferredAudioInputId } from "../utils/live";
 
 const VOICE_UI_DEBUG_LABELS = new Set([
   "join:start",
@@ -122,12 +95,6 @@ export function LivePage() {
   const [currentVoiceChannelId, setCurrentVoiceChannelId] = useState<number | null>(null);
   const [wsConnected, setWsConnected] = useState(false);
   const [status, setStatus] = useState("等待初始化");
-  const [notices, setNotices] = useState<Notice[]>([]);
-  const [authMode, setAuthMode] = useState<AuthMode>("register");
-  const [displayNameInput, setDisplayNameInput] = useState("");
-  const [emailInput, setEmailInput] = useState("");
-  const [passwordInput, setPasswordInput] = useState("");
-  const [verificationCodeInput, setVerificationCodeInput] = useState("");
   const [micEnabled, setMicEnabled] = useState(true);
   const [deafened, setDeafened] = useState(false);
   const [showAudioSettings, setShowAudioSettings] = useState(false);
@@ -150,17 +117,6 @@ export function LivePage() {
   const [localAudioStream, setLocalAudioStream] = useState<MediaStream | null>(null);
   const [localScreenStream, setLocalScreenStream] = useState<MediaStream | null>(null);
   const [maximizedScreenKey, setMaximizedScreenKey] = useState<string | null>(null);
-  const [submittingAuth, setSubmittingAuth] = useState(false);
-  const [sendingVerificationCode, setSendingVerificationCode] = useState(false);
-  const [verificationCooldown, setVerificationCooldown] = useState(0);
-  const [creatingDomain, setCreatingDomain] = useState(false);
-  const [domainNameInput, setDomainNameInput] = useState("");
-  const [domainDescriptionInput, setDomainDescriptionInput] = useState("");
-  const [channelComposerType, setChannelComposerType] = useState<"text" | "voice" | "screening" | null>(null);
-  const [channelNameInput, setChannelNameInput] = useState("");
-  const [channelTopicInput, setChannelTopicInput] = useState("");
-  const [submittingDomain, setSubmittingDomain] = useState(false);
-  const [submittingChannel, setSubmittingChannel] = useState(false);
   const [voiceTargetChannelId, setVoiceTargetChannelId] = useState<number | null>(null);
   const [screeningSnapshot, setScreeningSnapshot] = useState<ScreeningSnapshot | null>(null);
   const [screeningChannelMembers, setScreeningChannelMembers] = useState<Record<string, User[]>>({});
@@ -188,12 +144,84 @@ export function LivePage() {
   const currentUserRef = useRef<User | null>(null);
   const iceServersRef = useRef<RTCIceServer[]>([]);
   const startupAudioStreamRef = useRef<MediaStream | null>(null);
-  const noticeIdRef = useRef(0);
-  const noticeTimersRef = useRef(new Map<number, number>());
   const voiceJoinInFlightRef = useRef<number | null>(null);
   const voiceLeaveInFlightRef = useRef(false);
   const screeningJoinDedupRef = useRef<{ channelId: number | null; until: number }>({ channelId: null, until: 0 });
   const audioSetupPending = audioDevicesLoading || audioPrewarming;
+  const { notices, pushNotice, dismissNotice, resolveErrorMessage, showError, showInfo, clearAllNoticeTimers } = useNoticeDomain();
+  const {
+    authMode,
+    setAuthMode,
+    displayNameInput,
+    setDisplayNameInput,
+    emailInput,
+    setEmailInput,
+    passwordInput,
+    setPasswordInput,
+    verificationCodeInput,
+    setVerificationCodeInput,
+    submittingAuth,
+    sendingVerificationCode,
+    verificationCooldown,
+    setVerificationCooldown,
+    creatingDomain,
+    setCreatingDomain,
+    domainNameInput,
+    setDomainNameInput,
+    domainDescriptionInput,
+    setDomainDescriptionInput,
+    channelComposerType,
+    setChannelComposerType,
+    channelNameInput,
+    setChannelNameInput,
+    channelTopicInput,
+    setChannelTopicInput,
+    submittingDomain,
+    submittingChannel,
+    hydrateSession,
+    bootstrapData,
+    submitAuth,
+    requestVerificationCode,
+    switchDomain,
+    submitCreateDomain,
+    submitCreateChannel,
+    logout,
+  } = useSessionDomain({
+    session,
+    bootstrap,
+    setSession,
+    setUser,
+    setBootstrap,
+    setActiveChannel,
+    setMessages,
+    setVoiceTargetChannelId,
+    setOnlineCounts,
+    setScreeningSnapshot: () => setScreeningSnapshot(null),
+    setStatus,
+    setCurrentVoiceChannelId,
+    setVoiceMembers,
+    setRemoteMedia,
+    setPeerDiagnostics,
+    setOnlineUsers,
+    setVoiceChannelMembers,
+    setScreeningChannelMembers,
+    setDeafened,
+    setMicEnabled,
+    setScreenSharing,
+    setLocalAudioStream,
+    setLocalScreenStream,
+    setMaximizedScreenKey,
+    setMessageDraft,
+    setShowEmojiPicker,
+    setShowAudioSettings,
+    setShowProfileMenu,
+    socketRef,
+    rtcRef,
+    pushNotice,
+    showError,
+    showInfo,
+    resolveErrorMessage,
+  });
 
   useEffect(() => {
     if (session) return;
@@ -231,14 +259,11 @@ export function LivePage() {
 
   useEffect(() => {
     return () => {
-      noticeTimersRef.current.forEach((timer) => {
-        window.clearTimeout(timer);
-      });
-      noticeTimersRef.current.clear();
+      clearAllNoticeTimers();
       startupAudioStreamRef.current?.getTracks().forEach((track) => track.stop());
       startupAudioStreamRef.current = null;
     };
-  }, []);
+  }, [clearAllNoticeTimers]);
 
   useEffect(() => {
     const frame = window.requestAnimationFrame(() => {
@@ -367,46 +392,6 @@ export function LivePage() {
     }
   }, [bootstrap?.domain.id, localAudioStream, session, user]);
 
-  function pushNotice(kind: Notice["kind"], title: string, message: string) {
-    const id = noticeIdRef.current + 1;
-    noticeIdRef.current = id;
-    setNotices((current) => [...current, { id, kind, title, message }]);
-    const timer = window.setTimeout(
-      () => {
-        setNotices((current) => current.filter((item) => item.id !== id));
-        noticeTimersRef.current.delete(id);
-      },
-      kind === "error" ? 6400 : 4200,
-    );
-    noticeTimersRef.current.set(id, timer);
-  }
-
-  function dismissNotice(id: number) {
-    const timer = noticeTimersRef.current.get(id);
-    if (timer) {
-      window.clearTimeout(timer);
-      noticeTimersRef.current.delete(id);
-    }
-    setNotices((current) => current.filter((item) => item.id !== id));
-  }
-
-  function resolveErrorMessage(error: unknown, fallback: string) {
-    if (error instanceof Error && error.message.trim()) {
-      return error.message;
-    }
-    return fallback;
-  }
-
-  function showError(error: unknown, title: string, fallback: string) {
-    const message = resolveErrorMessage(error, fallback);
-    pushNotice("error", title, message);
-    return message;
-  }
-
-  function showInfo(title: string, message: string) {
-    pushNotice("info", title, message);
-  }
-
   useEffect(() => {
     if (!rtcRef.current) return;
     void rtcRef.current.setAudioInputDevice(selectedAudioInputId);
@@ -518,311 +503,6 @@ export function LivePage() {
     };
   }, [session?.token, user?.id, bootstrap?.domain.id]);
 
-  async function hydrateSession() {
-    if (!session) return;
-    try {
-      const currentUser = await fetchMe(session.token);
-      setUser(currentUser);
-    } catch (error) {
-      console.error(error);
-      logout();
-      setStatus("登录状态已失效，请重新登录");
-      showError(error, "登录状态失效", "登录状态已失效，请重新登录");
-    }
-  }
-
-  async function bootstrapData(channelId?: number, domainId?: number) {
-    if (!session) return;
-    try {
-      const data = await fetchBootstrap(session.token, channelId, domainId);
-      const channels = (data.categories || []).flatMap((category) => category.channels);
-      const firstTextChannel = channels.find((channel) => channel.type === "text") || null;
-      const firstVoiceChannel = channels.find((channel) => channel.type === "voice") || null;
-      const preferredActiveChannel = data.activeChannel || firstTextChannel || channels[0] || null;
-      setBootstrap(data);
-      setUser(data.user);
-      setActiveChannel(preferredActiveChannel);
-      setMessages(data.messages);
-      setVoiceTargetChannelId(firstVoiceChannel?.id || null);
-      setOnlineCounts(data.onlineCounts || {});
-      if (preferredActiveChannel?.type !== "screening") {
-        setScreeningSnapshot(null);
-      }
-      setStatus("页面已就绪");
-    } catch (error) {
-      console.error(error);
-      setStatus("初始化失败，请检查服务与数据库");
-      showError(error, "初始化失败", "请检查服务与数据库");
-    }
-  }
-
-  useEffect(() => {
-    if (!session || !bootstrap?.domain.id) return;
-
-    let cancelled = false;
-    let timer = 0;
-
-    const tick = async () => {
-      try {
-        const snapshot = await fetchDomainPresence(bootstrap.domain.id, session.token);
-        if (cancelled) return;
-        setOnlineCounts(snapshot.onlineCounts || {});
-        setVoiceChannelMembers(snapshot.voiceMembers || {});
-        setScreeningChannelMembers(
-          Object.fromEntries(
-            Object.entries(snapshot.screeningMembers || {}).map(([channelId, viewers]) => [
-              channelId,
-              (viewers || []).map((viewer) => viewer.user),
-            ]),
-          ),
-        );
-        setOnlineUsers(new Map((snapshot.onlineUsers || []).map((item) => [item.user.id, item])));
-      } catch (error) {
-        if (!cancelled) {
-          console.error(error);
-        }
-      }
-    };
-
-    void tick();
-    timer = window.setInterval(() => {
-      void tick();
-    }, 4000);
-
-    return () => {
-      cancelled = true;
-      window.clearInterval(timer);
-    };
-  }, [session?.token, bootstrap?.domain.id]);
-
-  async function submitAuth() {
-    if (!emailInput.trim() || !passwordInput.trim()) {
-      const message = "请输入邮箱和密码";
-      setStatus(message);
-      pushNotice("error", "认证信息不完整", message);
-      return;
-    }
-    if (authMode === "register" && !displayNameInput.trim()) {
-      const message = "请输入昵称";
-      setStatus(message);
-      pushNotice("error", "注册信息不完整", message);
-      return;
-    }
-    if (authMode === "register" && !verificationCodeInput.trim()) {
-      const message = "请输入邮箱验证码";
-      setStatus(message);
-      pushNotice("error", "注册信息不完整", message);
-      return;
-    }
-
-    setSubmittingAuth(true);
-    try {
-      const result =
-        authMode === "register"
-          ? await registerAccount({
-              displayName: displayNameInput.trim(),
-              email: emailInput.trim(),
-              password: passwordInput,
-              code: verificationCodeInput.trim(),
-            })
-          : await loginAccount({
-              email: emailInput.trim(),
-              password: passwordInput,
-            });
-
-      saveSession(result);
-      setSession(result);
-      setUser(result.user);
-      setDisplayNameInput("");
-      setEmailInput("");
-      setPasswordInput("");
-      setVerificationCodeInput("");
-      setVerificationCooldown(0);
-      setStatus(authMode === "register" ? "注册成功，正在进入频道" : "登录成功");
-      showInfo(authMode === "register" ? "注册成功" : "登录成功", authMode === "register" ? "账号已创建，正在进入频道" : "欢迎回来");
-    } catch (error) {
-      console.error(error);
-      setStatus(resolveErrorMessage(error, "认证失败"));
-      showError(error, authMode === "register" ? "注册失败" : "登录失败", "认证失败");
-    } finally {
-      setSubmittingAuth(false);
-    }
-  }
-
-  async function requestVerificationCode() {
-    if (!emailInput.trim()) {
-      const message = "请先输入邮箱";
-      setStatus(message);
-      pushNotice("error", "无法发送验证码", message);
-      return;
-    }
-
-    setSendingVerificationCode(true);
-    try {
-      const result = await sendVerificationCode({ email: emailInput.trim() });
-      setVerificationCooldown(result.cooldown || 60);
-      setStatus(result.emailDebug ? "验证码已生成，当前环境未启用邮件发送，请查看服务端日志" : result.message || "验证码已发送");
-      showInfo("验证码已发送", result.emailDebug ? "当前环境未启用邮件发送，请查看服务端日志" : result.message || "请检查你的邮箱收件箱");
-    } catch (error) {
-      console.error(error);
-      setStatus(resolveErrorMessage(error, "验证码发送失败"));
-      showError(error, "验证码发送失败", "请稍后重试");
-    } finally {
-      setSendingVerificationCode(false);
-    }
-  }
-
-  async function switchDomain(domainId: number) {
-    if (!bootstrap || bootstrap.domain.id === domainId) return;
-    await rtcRef.current?.leaveVoice();
-    setCurrentVoiceChannelId(null);
-    setVoiceMembers(new Map());
-    setRemoteMedia(new Map());
-    setVoiceChannelMembers({});
-    setOnlineCounts({});
-    setMessages([]);
-    setScreenSharing(false);
-    setLocalAudioStream(null);
-    setLocalScreenStream(null);
-    setMaximizedScreenKey(null);
-    setMessageDraft("");
-    setShowEmojiPicker(false);
-    setShowAudioSettings(false);
-    setShowProfileMenu(false);
-    setVoiceTargetChannelId(null);
-    setStatus("正在切换域...");
-    await bootstrapData(undefined, domainId);
-  }
-
-  async function submitCreateDomain() {
-    if (!session) return;
-    if (!domainNameInput.trim()) {
-      const message = "请输入域名称";
-      setStatus(message);
-      pushNotice("error", "创建域失败", message);
-      return;
-    }
-    setSubmittingDomain(true);
-    try {
-      const domain = await createDomain(session.token, {
-        name: domainNameInput.trim(),
-        description: domainDescriptionInput.trim() || "新的团队域。",
-      });
-      setCreatingDomain(false);
-      setDomainNameInput("");
-      setDomainDescriptionInput("");
-      await switchDomain(domain.id);
-      setStatus("域创建成功");
-      showInfo("域创建成功", `已创建域 ${domain.name}`);
-    } catch (error) {
-      console.error(error);
-      setStatus(resolveErrorMessage(error, "创建域失败"));
-      showError(error, "创建域失败", "请稍后重试");
-    } finally {
-      setSubmittingDomain(false);
-    }
-  }
-
-  function resolveCategoryForType(type: "text" | "voice" | "screening") {
-    const categories = bootstrap?.categories || [];
-    const matchByChannel = categories.find((category) => category.channels.some((channel) => channel.type === type));
-    if (matchByChannel) return matchByChannel;
-    const matchByName = categories.find((category) =>
-      type === "text"
-        ? /text/i.test(category.name) || /文字/.test(category.name)
-        : type === "voice"
-          ? /voice/i.test(category.name) || /语音/.test(category.name)
-          : /screen/i.test(category.name) || /放映|观影|screening/i.test(category.name),
-    );
-    return matchByName || null;
-  }
-
-  async function submitCreateChannel() {
-    if (!session || !bootstrap || !channelComposerType) return;
-    if (!channelNameInput.trim()) {
-      const message = "请输入频道名称";
-      setStatus(message);
-      pushNotice("error", "创建频道失败", message);
-      return;
-    }
-    setSubmittingChannel(true);
-    try {
-      let category = resolveCategoryForType(channelComposerType);
-      if (!category) {
-        category = await createCategory(bootstrap.domain.id, session.token, {
-          name: channelComposerType === "text" ? "TEXT CHANNELS" : channelComposerType === "voice" ? "VOICE CHANNELS" : "SCREENING ROOMS",
-        });
-      }
-      const channel = await createChannel(bootstrap.domain.id, session.token, {
-        categoryId: category.id,
-        name: channelNameInput.trim(),
-        type: channelComposerType,
-        topic:
-          channelTopicInput.trim() ||
-          (channelComposerType === "text"
-            ? "新的文字频道。"
-            : channelComposerType === "voice"
-              ? "新的语音频道。"
-              : "新的放映室，可同步播放直链视频。"),
-        maxMembers: channelComposerType === "voice" ? 16 : channelComposerType === "screening" ? 24 : 0,
-      });
-      setChannelComposerType(null);
-      setChannelNameInput("");
-      setChannelTopicInput("");
-      await bootstrapData(channel.id, bootstrap.domain.id);
-      setStatus(`${channelComposerType === "text" ? "文字" : channelComposerType === "voice" ? "语音" : "放映室"}频道创建成功`);
-      showInfo(
-        "频道创建成功",
-        `已创建${channelComposerType === "text" ? "文字" : channelComposerType === "voice" ? "语音" : "放映室"}频道 ${channel.name}`,
-      );
-    } catch (error) {
-      console.error(error);
-      setStatus(resolveErrorMessage(error, "创建频道失败"));
-      showError(error, "创建频道失败", "请稍后重试");
-    } finally {
-      setSubmittingChannel(false);
-    }
-  }
-
-  function logout() {
-    socketRef.current?.close();
-    clearSession();
-    setSession(null);
-    setUser(null);
-    setBootstrap(null);
-    setActiveChannel(null);
-    setMessages([]);
-    setVoiceMembers(new Map());
-    setRemoteMedia(new Map());
-    setPeerDiagnostics(new Map());
-    setOnlineCounts({});
-    setOnlineUsers(new Map());
-    setVoiceChannelMembers({});
-    setCurrentVoiceChannelId(null);
-    setDeafened(false);
-    setMicEnabled(true);
-    setScreenSharing(false);
-    setLocalAudioStream(null);
-    setLocalScreenStream(null);
-    setMaximizedScreenKey(null);
-    setMessageDraft("");
-    setShowEmojiPicker(false);
-    setWsConnected(false);
-    setCreatingDomain(false);
-    setDomainNameInput("");
-    setDomainDescriptionInput("");
-    setChannelComposerType(null);
-    setChannelNameInput("");
-    setChannelTopicInput("");
-    setSubmittingDomain(false);
-    setSubmittingChannel(false);
-    setVoiceTargetChannelId(null);
-    setScreeningSnapshot(null);
-    setScreeningChannelMembers({});
-    setScreeningUrlInput("");
-    setScreeningTitleInput("");
-  }
-
   async function selectChannel(channel: Channel) {
     if (!bootstrap || !session) return;
     if (activeChannel?.type === "screening" && activeChannel.id !== channel.id) {
@@ -843,7 +523,7 @@ export function LivePage() {
       if (channel.type === "screening" && currentVoiceChannelId && currentVoiceChannelId !== channel.id) {
         await leaveVoice();
       }
-      const nextMessages = await fetchChannelMessages(bootstrap.domain.id, channel.id, session.token);
+      const nextMessages = await liveFacade.fetchChannelMessages(bootstrap.domain.id, channel.id, session.token);
       startTransition(() => {
         setActiveChannel(channel);
         setMessages(nextMessages);
@@ -1200,7 +880,8 @@ export function LivePage() {
     setShowEmojiPicker(false);
     window.setTimeout(() => {
       if (!bootstrap || !session || activeChannelIdRef.current !== activeChannel.id) return;
-      void fetchChannelMessages(bootstrap.domain.id, activeChannel.id, session.token)
+      void liveFacade
+        .fetchChannelMessages(bootstrap.domain.id, activeChannel.id, session.token)
         .then((nextMessages) => {
           if (activeChannelIdRef.current === activeChannel.id) {
             setMessages(nextMessages);
@@ -1461,7 +1142,8 @@ export function LivePage() {
     if (!session || !bootstrap || !chatChannel) return;
     if (activeChannel?.type !== "voice" || currentVoiceChannelId) return;
 
-    void fetchChannelMessages(bootstrap.domain.id, chatChannel.id, session.token)
+    void liveFacade
+      .fetchChannelMessages(bootstrap.domain.id, chatChannel.id, session.token)
       .then((nextMessages) => {
         setMessages(nextMessages);
       })
@@ -2177,1067 +1859,5 @@ export function LivePage() {
       ) : null}
       <NoticeViewport notices={notices} onDismiss={dismissNotice} />
     </div>
-  );
-}
-
-function ScreeningRoomPanel({
-  channel,
-  snapshot,
-  currentUser,
-  joinEpoch,
-  urlInput,
-  titleInput,
-  onUrlInputChange,
-  onTitleInputChange,
-  onReplace,
-  onAppend,
-  onPlaybackEvent,
-  onError,
-}: {
-  channel: Channel;
-  snapshot: ScreeningSnapshot | null;
-  currentUser: User | null;
-  joinEpoch: number;
-  urlInput: string;
-  titleInput: string;
-  onUrlInputChange: (value: string) => void;
-  onTitleInputChange: (value: string) => void;
-  onReplace: (input: { url: string; title: string }) => void;
-  onAppend: (input: { url: string; title: string }) => void;
-  onPlaybackEvent: (type: string, payload: { itemId?: string; currentTime: number; playbackRate: number }) => void;
-  onError: (title: string, message: string) => void;
-}) {
-  const playerRef = useRef<ScreeningPlayerElement | null>(null);
-  const tickTimerRef = useRef<number | null>(null);
-  const lastLoadedItemRef = useRef<string>("");
-  const lastAppliedJoinEpochRef = useRef(-1);
-  const previousControllerRef = useRef(false);
-
-  const state = snapshot?.state || null;
-  const viewers = snapshot?.viewers || [];
-  const isController = Boolean(currentUser && state && state.controllerUserId === currentUser.id);
-  const controllerName = viewers.find((item) => item.user.id === state?.controllerUserId)?.user.displayName || "当前主持人";
-  const isLiveScreening = isLikelyLiveScreeningURL(state?.currentUrl);
-
-  useEffect(() => {
-    const player = playerRef.current;
-    if (!player) return;
-    if (!state) {
-      if (player.src) {
-        player.src = "";
-      }
-      lastLoadedItemRef.current = "";
-      lastAppliedJoinEpochRef.current = -1;
-      return;
-    }
-    const shouldReloadForJoin = lastAppliedJoinEpochRef.current !== joinEpoch;
-    if (
-      state.currentItemId &&
-      (lastLoadedItemRef.current !== state.currentItemId || player.src !== (state.currentUrl || "") || shouldReloadForJoin)
-    ) {
-      lastLoadedItemRef.current = state.currentItemId;
-      lastAppliedJoinEpochRef.current = joinEpoch;
-      player.src = state.currentUrl || "";
-      console.info(`[screening-ui][${new Date().toISOString()}] screening:player:src-assigned`, {
-        channelId: state.channelId,
-        itemId: state.currentItemId,
-        currentUrl: state.currentUrl,
-        joinEpoch,
-      });
-    } else if (!state.currentItemId && player.src) {
-      player.src = "";
-      lastLoadedItemRef.current = "";
-    }
-  }, [joinEpoch, state?.channelId, state?.currentItemId, state?.currentUrl, state]);
-
-  useEffect(() => {
-    const player = playerRef.current;
-    if (!player || !state || !state.currentItemId) return;
-
-    if (isLiveScreening) {
-      if (state.playbackState === "playing" && player.paused) {
-        void player.play().catch(() => undefined);
-      }
-      if (
-        (state.playbackState === "paused" ||
-          state.playbackState === "loading" ||
-          state.playbackState === "ended" ||
-          state.playbackState === "idle") &&
-        !player.paused
-      ) {
-        void player.pause().catch(() => undefined);
-      }
-      return;
-    }
-
-    const elapsed =
-      state.playbackState === "playing" && state.updatedAt ? Math.max(0, (Date.now() - new Date(state.updatedAt).getTime()) / 1000) : 0;
-    const targetTime = state.playbackState === "playing" ? state.currentTime + elapsed * (state.playbackRate || 1) : state.currentTime;
-    if (state.playbackRate > 0 && Math.abs(player.playbackRate - state.playbackRate) > 0.01) {
-      player.playbackRate = state.playbackRate;
-    }
-    if (Math.abs(player.currentTime - targetTime) >= 3) {
-      try {
-        player.currentTime = targetTime;
-      } catch {
-        // ignore seek race during loading
-      }
-    }
-    if (state.playbackState === "playing" && player.paused) {
-      void player.play().catch(() => undefined);
-    }
-    if (
-      (state.playbackState === "paused" ||
-        state.playbackState === "loading" ||
-        state.playbackState === "ended" ||
-        state.playbackState === "idle") &&
-      !player.paused
-    ) {
-      void player.pause().catch(() => undefined);
-    }
-  }, [isLiveScreening, state]);
-
-  useEffect(() => {
-    if (tickTimerRef.current) {
-      window.clearInterval(tickTimerRef.current);
-      tickTimerRef.current = null;
-    }
-    if (!isController || !state || state.playbackState !== "playing" || isLiveScreening) {
-      return;
-    }
-    tickTimerRef.current = window.setInterval(() => {
-      const player = playerRef.current;
-      if (!player || !state.currentItemId) return;
-      onPlaybackEvent("screening.tick", {
-        itemId: state.currentItemId,
-        currentTime: player.currentTime,
-        playbackRate: player.playbackRate || 1,
-      });
-    }, 2500);
-    return () => {
-      if (tickTimerRef.current) {
-        window.clearInterval(tickTimerRef.current);
-        tickTimerRef.current = null;
-      }
-    };
-  }, [isController, isLiveScreening, onPlaybackEvent, state]);
-
-  useEffect(() => {
-    const player = playerRef.current;
-    if (!player) return;
-
-    const logPlayerEvent = (eventName: string, extra?: Record<string, unknown>) => {
-      console.info(`[screening-ui][${new Date().toISOString()}] screening:player:${eventName}`, {
-        channelId: state?.channelId || channel.id,
-        itemId: state?.currentItemId || "",
-        currentUrl: state?.currentUrl || player.src || "",
-        playbackState: state?.playbackState || "idle",
-        currentTime: Number.isFinite(player.currentTime) ? player.currentTime : null,
-        paused: player.paused,
-        playbackRate: player.playbackRate || 1,
-        ...extra,
-      });
-    };
-
-    const handleCanPlay = () => {
-      logPlayerEvent("can-play");
-      if (!isController || !state?.awaitingReady || !state.currentItemId) return;
-      onPlaybackEvent("screening.controller.ready", {
-        itemId: state.currentItemId,
-        currentTime: 0,
-        playbackRate: player.playbackRate || 1,
-      });
-    };
-    const handlePlay = () => {
-      logPlayerEvent("play");
-      if (!isController || !state?.currentItemId) return;
-      onPlaybackEvent("screening.play", {
-        itemId: state.currentItemId,
-        currentTime: player.currentTime || 0,
-        playbackRate: player.playbackRate || 1,
-      });
-    };
-    const handlePause = () => {
-      logPlayerEvent("pause");
-      if (!isController || !state?.currentItemId || state.playbackState === "loading") return;
-      onPlaybackEvent("screening.pause", {
-        itemId: state.currentItemId,
-        currentTime: player.currentTime || 0,
-        playbackRate: player.playbackRate || 1,
-      });
-    };
-    const handleSeeked = () => {
-      if (isLiveScreening) return;
-      logPlayerEvent("seeked");
-      if (!isController || !state?.currentItemId) return;
-      onPlaybackEvent("screening.seek", {
-        itemId: state.currentItemId,
-        currentTime: player.currentTime || 0,
-        playbackRate: player.playbackRate || 1,
-      });
-    };
-    const handleRateChange = () => {
-      if (isLiveScreening) return;
-      logPlayerEvent("rate-change");
-      if (!isController || !state?.currentItemId) return;
-      onPlaybackEvent("screening.rate", {
-        itemId: state.currentItemId,
-        currentTime: player.currentTime || 0,
-        playbackRate: player.playbackRate || 1,
-      });
-    };
-    const handleEnded = () => {
-      logPlayerEvent("ended");
-      if (!isController || !state?.currentItemId) return;
-      onPlaybackEvent("screening.item.ended", {
-        itemId: state.currentItemId,
-        currentTime: 0,
-        playbackRate: player.playbackRate || 1,
-      });
-    };
-    const handleLoadedMetadata = () => {
-      logPlayerEvent("loaded-metadata", {
-        duration: typeof player.duration === "number" && Number.isFinite(player.duration) ? player.duration : null,
-      });
-    };
-    const handleCanPlayThrough = () => {
-      logPlayerEvent("can-play-through");
-    };
-    const handleWaiting = () => {
-      logPlayerEvent("waiting");
-    };
-    const handleStalled = () => {
-      logPlayerEvent("stalled");
-    };
-    const handleSeeking = () => {
-      logPlayerEvent("seeking");
-    };
-    const handleError = (event: Event) => {
-      const playerWithError = player as HTMLElement & {
-        error?: { code?: number; message?: string } | null;
-        networkState?: number;
-        readyState?: number;
-      };
-      logPlayerEvent("error", {
-        eventType: event.type,
-        errorCode: playerWithError.error?.code ?? null,
-        errorMessage: playerWithError.error?.message ?? null,
-        networkState: playerWithError.networkState ?? null,
-        readyState: playerWithError.readyState ?? null,
-      });
-    };
-
-    player.addEventListener("can-play", handleCanPlay);
-    player.addEventListener("can-play-through", handleCanPlayThrough);
-    player.addEventListener("loaded-metadata", handleLoadedMetadata);
-    player.addEventListener("play", handlePlay);
-    player.addEventListener("pause", handlePause);
-    player.addEventListener("waiting", handleWaiting);
-    player.addEventListener("stalled", handleStalled);
-    player.addEventListener("seeking", handleSeeking);
-    player.addEventListener("seeked", handleSeeked);
-    player.addEventListener("rate-change", handleRateChange);
-    player.addEventListener("end", handleEnded);
-    player.addEventListener("error", handleError);
-
-    return () => {
-      player.removeEventListener("can-play", handleCanPlay);
-      player.removeEventListener("can-play-through", handleCanPlayThrough);
-      player.removeEventListener("loaded-metadata", handleLoadedMetadata);
-      player.removeEventListener("play", handlePlay);
-      player.removeEventListener("pause", handlePause);
-      player.removeEventListener("waiting", handleWaiting);
-      player.removeEventListener("stalled", handleStalled);
-      player.removeEventListener("seeking", handleSeeking);
-      player.removeEventListener("seeked", handleSeeked);
-      player.removeEventListener("rate-change", handleRateChange);
-      player.removeEventListener("end", handleEnded);
-      player.removeEventListener("error", handleError);
-    };
-  }, [channel.id, isController, onPlaybackEvent, state]);
-
-  useEffect(() => {
-    const becameController = isController && !previousControllerRef.current;
-    previousControllerRef.current = isController;
-    if (!becameController || !state?.currentItemId) {
-      return;
-    }
-    const timer = window.setTimeout(() => {
-      const player = playerRef.current;
-      if (!player) return;
-      const payload = {
-        itemId: state.currentItemId,
-        currentTime: Number.isFinite(player.currentTime) ? player.currentTime : state.currentTime,
-        playbackRate: player.playbackRate || state.playbackRate || 1,
-      };
-      if (state.awaitingReady) {
-        onPlaybackEvent("screening.controller.ready", payload);
-        return;
-      }
-      onPlaybackEvent(player.paused ? "screening.pause" : "screening.tick", payload);
-    }, 180);
-    return () => window.clearTimeout(timer);
-  }, [isController, isLiveScreening, onPlaybackEvent, state]);
-
-  async function prepareSubmissionInput() {
-    const url = urlInput.trim();
-    if (!url) {
-      onError("放映室操作失败", "请输入可直接播放的视频 URL");
-      return null;
-    }
-    return { url, title: titleInput.trim() };
-  }
-
-  return (
-    <section className="screening-panel">
-      <div className="screening-panel__header">
-        <div className="screening-panel__title">
-          <div className="chat-panel__title-icon">
-            <PlayIcon />
-          </div>
-          <div>
-            <h3>{channel.name}</h3>
-            <span>{state?.currentTitle || channel.topic || "通过可直链访问的视频 URL 发起同步观影。"}</span>
-          </div>
-        </div>
-        <div className="screening-panel__meta">
-          <span className="connection-badge">{state?.playbackState || "idle"}</span>
-          <span className="screening-panel__controller">控制者：{controllerName}</span>
-        </div>
-      </div>
-
-      <div className="screening-stage">
-        <div className="screening-stage__video-wrap">
-          <media-player
-            ref={(node: HTMLElement | null) => {
-              playerRef.current = node as ScreeningPlayerElement | null;
-            }}
-            class="screening-stage__player"
-            aspect-ratio="16/9"
-            src={state?.currentUrl || undefined}
-            title={state?.currentTitle || channel.name}
-            viewType="video"
-            streamType={isLiveScreening ? "live" : "on-demand"}
-            load="visible"
-            preload="auto"
-            playsinline
-            crossorigin
-          >
-            <media-outlet></media-outlet>
-            <media-community-skin></media-community-skin>
-          </media-player>
-          {!state?.currentUrl ? <div className="screening-stage__empty">输入直链视频 URL 后即可开始放映</div> : null}
-        </div>
-      </div>
-
-      <div className="screening-composer">
-        <div className="screening-composer__inputs">
-          <input
-            value={urlInput}
-            onChange={(event) => onUrlInputChange(event.target.value)}
-            placeholder="输入可直接播放的视频 URL，例如 https://.../demo.mp4"
-          />
-          <input value={titleInput} onChange={(event) => onTitleInputChange(event.target.value)} placeholder="可选标题" />
-        </div>
-        <div className="screening-composer__actions">
-          <button
-            className="action-pill"
-            onClick={() => {
-              void (async () => {
-                const next = await prepareSubmissionInput();
-                if (!next) return;
-                onReplace(next);
-              })();
-            }}
-          >
-            替换当前并开始
-          </button>
-          <button
-            className="action-pill"
-            onClick={() => {
-              void (async () => {
-                const next = await prepareSubmissionInput();
-                if (!next) return;
-                onAppend(next);
-              })();
-            }}
-          >
-            加入播放列表
-          </button>
-        </div>
-      </div>
-    </section>
-  );
-}
-
-function ScreeningPlaylistSection({ playlist }: { playlist: ScreeningPlaylistItem[] }) {
-  return (
-    <section className="member-section">
-      <h4>{`播放列表 · ${playlist.length}`}</h4>
-      <div className="screening-playlist-sidebar">
-        {playlist.length ? (
-          playlist.map((item, index) => (
-            <div key={item.itemId} className="screening-playlist__item">
-              <span>{index + 1}</span>
-              <div>
-                <strong>{item.title || item.url}</strong>
-                <p>{item.url}</p>
-              </div>
-            </div>
-          ))
-        ) : (
-          <div className="empty-state empty-state--small">当前播放列表为空</div>
-        )}
-      </div>
-    </section>
-  );
-}
-
-function MemberSection({
-  title,
-  members,
-  voiceMembers,
-  onlineUsers,
-  channelNameById,
-  showCount = true,
-  localAudioStream,
-  remoteMedia,
-  currentUserId = 0,
-  currentUserMicEnabled = true,
-  showVoiceState = false,
-  peerDiagnostics,
-}: {
-  title: string;
-  members: DomainMember[];
-  voiceMembers: Map<number, PresenceMember>;
-  onlineUsers: Map<number, OnlineUserPresence>;
-  channelNameById: Map<number, string>;
-  showCount?: boolean;
-  localAudioStream?: MediaStream | null;
-  remoteMedia?: Map<number, RemoteMedia>;
-  currentUserId?: number;
-  currentUserMicEnabled?: boolean;
-  showVoiceState?: boolean;
-  peerDiagnostics: Map<number, PeerConnectionDiagnostics>;
-}) {
-  const sortedMembers = [...members].sort((left, right) => {
-    if (left.role !== right.role) {
-      if (left.role === "owner") return -1;
-      if (right.role === "owner") return 1;
-    }
-    return left.displayName.localeCompare(right.displayName, "zh-CN");
-  });
-
-  return (
-    <section className="member-section">
-      <h4>{showCount ? `${title} · ${members.length}` : title}</h4>
-      {members.length ? (
-        sortedMembers.map((member) => {
-          const presence = voiceMembers.get(member.id);
-          const online = onlineUsers.get(member.id);
-          return (
-            <MemberRowItem
-              key={member.id}
-              member={member}
-              presence={presence}
-              online={online}
-              channelNameById={channelNameById}
-              localAudioStream={localAudioStream || null}
-              remoteMedia={remoteMedia || null}
-              currentUserId={currentUserId}
-              currentUserMicEnabled={currentUserMicEnabled}
-              showVoiceState={showVoiceState}
-              diagnostics={peerDiagnostics.get(member.id)}
-            />
-          );
-        })
-      ) : (
-        <div className="empty-state empty-state--small">暂无成员</div>
-      )}
-    </section>
-  );
-}
-
-function MemberRowItem({
-  member,
-  presence,
-  online,
-  channelNameById,
-  localAudioStream,
-  remoteMedia,
-  currentUserId,
-  currentUserMicEnabled,
-  showVoiceState,
-  diagnostics,
-}: {
-  member: DomainMember;
-  presence?: PresenceMember;
-  online?: OnlineUserPresence;
-  channelNameById: Map<number, string>;
-  localAudioStream: MediaStream | null;
-  remoteMedia: Map<number, RemoteMedia> | null;
-  currentUserId: number;
-  currentUserMicEnabled: boolean;
-  showVoiceState: boolean;
-  diagnostics?: PeerConnectionDiagnostics;
-}) {
-  const stream = member.id === currentUserId ? localAudioStream : remoteMedia?.get(member.id)?.audioStream || null;
-  const micState = member.id === currentUserId ? currentUserMicEnabled : Boolean(presence?.micEnabled);
-  const speaking = useSpeakingState(stream, micState);
-
-  return (
-    <div className="member-row">
-      <div className={`avatar ${speaking ? "avatar--speaking" : ""}`} style={{ background: member.avatarColor }}>
-        {initials(member.displayName)}
-      </div>
-      <div className="member-row__content">
-        <strong>
-          {member.displayName}
-          {member.role === "owner" ? <span className="member-role-badge">域主</span> : null}
-        </strong>
-        <span>
-          {showVoiceState && presence
-            ? `${micState ? "开麦" : "静音"}${online ? ` · 域 ${online.domainId} · 正在 ${channelNameById.get(presence.channelId) || "房间"}` : ""}`
-            : presence
-              ? `${online?.domainId ? `域 ${online.domainId}` : "当前域"} · 正在 ${channelNameById.get(presence.channelId) || "语音频道"}`
-              : online
-                ? online.currentChannelId
-                  ? `域 ${online.domainId} · 正在 ${channelNameById.get(online.currentChannelId) || "语音频道"}`
-                  : `域 ${online.domainId} · 在线`
-                : "离线"}
-        </span>
-        {diagnostics ? <span className="member-row__diagnostics">{formatPeerDiagnostics(diagnostics)}</span> : null}
-      </div>
-    </div>
-  );
-}
-
-function VoiceAvatarOrb({
-  user,
-  stream,
-  screenStream,
-  onMaximizeScreen,
-  micEnabled,
-  screenSharing,
-  isCurrentUser,
-  diagnostics,
-}: {
-  user: User;
-  stream: MediaStream | null;
-  screenStream: MediaStream | null;
-  onMaximizeScreen?: () => void;
-  micEnabled: boolean;
-  screenSharing: boolean;
-  isCurrentUser: boolean;
-  diagnostics?: PeerConnectionDiagnostics;
-}) {
-  const speaking = useSpeakingState(stream, micEnabled);
-  const previewRef = useRef<HTMLDivElement | null>(null);
-  const videoRef = useRef<HTMLVideoElement | null>(null);
-
-  useEffect(() => {
-    if (!videoRef.current || !screenStream) return;
-    videoRef.current.srcObject = screenStream;
-    void videoRef.current.play().catch(() => undefined);
-  }, [screenStream]);
-
-  async function openSystemFullscreen() {
-    if (!screenStream || !previewRef.current) return;
-    try {
-      await previewRef.current.requestFullscreen();
-    } catch (error) {
-      console.error(error);
-    }
-  }
-
-  return (
-    <div className={`voice-orb ${screenSharing && screenStream ? "voice-orb--sharing" : ""}`}>
-      <div
-        ref={previewRef}
-        className={`voice-orb__button ${screenStream ? "voice-orb__button--preview" : ""}`}
-        onClick={screenStream && onMaximizeScreen ? onMaximizeScreen : undefined}
-        role={screenStream ? "button" : undefined}
-        tabIndex={screenStream ? 0 : undefined}
-        onKeyDown={
-          screenStream && onMaximizeScreen
-            ? (event) => {
-                if (event.key === "Enter" || event.key === " ") {
-                  event.preventDefault();
-                  onMaximizeScreen();
-                }
-              }
-            : undefined
-        }
-      >
-        <div
-          className={`voice-orb__avatar ${speaking ? "voice-orb__avatar--speaking" : ""} ${screenSharing ? "voice-orb__avatar--sharing" : ""}`}
-          style={{ background: user.avatarColor }}
-        >
-          {screenSharing && screenStream ? (
-            <>
-              <video ref={videoRef} autoPlay playsInline muted className="voice-orb__screen" />
-              <div className="voice-orb__preview-actions">
-                <button
-                  className="voice-orb__preview-tag"
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    onMaximizeScreen?.();
-                  }}
-                >
-                  放大
-                </button>
-                <button
-                  className="voice-orb__preview-tag"
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    void openSystemFullscreen();
-                  }}
-                >
-                  全屏
-                </button>
-              </div>
-            </>
-          ) : (
-            initials(user.displayName)
-          )}
-        </div>
-      </div>
-      <strong>{user.displayName}</strong>
-      <span>
-        {screenSharing && screenStream
-          ? isCurrentUser
-            ? "你 · 正在共享，可放大或全屏"
-            : "正在共享，可放大或全屏"
-          : isCurrentUser
-            ? micEnabled
-              ? "你 · 麦克风开启"
-              : "你 · 已静音"
-            : micEnabled
-              ? "麦克风开启"
-              : "已静音"}
-      </span>
-      {diagnostics ? <span className="voice-orb__diagnostics">{formatPeerDiagnostics(diagnostics)}</span> : null}
-    </div>
-  );
-}
-
-function RemoteAudioLayer({
-  remoteMedia,
-  selfUserId,
-  deafened,
-  remoteVolume,
-}: {
-  remoteMedia: Map<number, RemoteMedia>;
-  selfUserId: number;
-  deafened: boolean;
-  remoteVolume: number;
-}) {
-  const audioRefs = useRef(new Map<string, HTMLAudioElement>());
-
-  useEffect(() => {
-    const activeIds = new Set<string>();
-
-    remoteMedia.forEach((entry, userId) => {
-      if (userId === selfUserId) return;
-      const streams = [
-        { key: `${userId}:voice`, stream: entry.audioStream },
-        { key: `${userId}:screen`, stream: entry.displayAudioStream },
-      ];
-      streams.forEach(({ key, stream }) => {
-        if (!stream) return;
-        activeIds.add(key);
-        const element = audioRefs.current.get(key);
-        if (!element) return;
-        if (element.srcObject !== stream) {
-          element.srcObject = stream;
-        }
-        element.muted = deafened;
-        element.volume = Math.max(0, Math.min(1, remoteVolume / 100));
-        void element.play().catch((error) => {
-          console.error("remote audio play failed", error);
-        });
-      });
-    });
-
-    audioRefs.current.forEach((element, key) => {
-      if (activeIds.has(key)) return;
-      element.pause();
-      element.srcObject = null;
-    });
-  }, [deafened, remoteMedia, remoteVolume, selfUserId]);
-
-  return (
-    <div className="remote-audio-layer" aria-hidden="true">
-      {[...remoteMedia.entries()].flatMap(([userId]) => [
-        <audio
-          key={`${userId}:voice`}
-          ref={(node) => {
-            if (node) {
-              audioRefs.current.set(`${userId}:voice`, node);
-            } else {
-              audioRefs.current.delete(`${userId}:voice`);
-            }
-          }}
-          autoPlay
-          playsInline
-        />,
-        <audio
-          key={`${userId}:screen`}
-          ref={(node) => {
-            if (node) {
-              audioRefs.current.set(`${userId}:screen`, node);
-            } else {
-              audioRefs.current.delete(`${userId}:screen`);
-            }
-          }}
-          autoPlay
-          playsInline
-        />,
-      ])}
-    </div>
-  );
-}
-
-function ScreenPreviewModal({ screen, onClose }: { screen: ScreenPreview; onClose: () => void }) {
-  const frameRef = useRef<HTMLDivElement | null>(null);
-  const videoRef = useRef<HTMLVideoElement | null>(null);
-
-  useEffect(() => {
-    if (!videoRef.current) return;
-    videoRef.current.srcObject = screen.stream;
-    void videoRef.current.play().catch(() => undefined);
-  }, [screen.stream]);
-
-  async function openSystemFullscreen() {
-    if (!frameRef.current) return;
-    try {
-      await frameRef.current.requestFullscreen();
-    } catch (error) {
-      console.error(error);
-    }
-  }
-
-  return (
-    <div className="screen-modal">
-      <div className="screen-modal__panel" ref={frameRef}>
-        <div className="screen-modal__toolbar">
-          <div>
-            <div className="eyebrow">SCREEN PREVIEW</div>
-            <strong>
-              {screen.user.displayName}
-              {screen.isLocal ? " · 你的共享屏幕" : " · 正在共享屏幕"}
-            </strong>
-          </div>
-          <div className="screen-modal__actions">
-            <button className="action-pill" onClick={() => void openSystemFullscreen()}>
-              系统全屏
-            </button>
-            <button className="action-pill" onClick={onClose}>
-              关闭
-            </button>
-          </div>
-        </div>
-        <video ref={videoRef} autoPlay playsInline muted className="screen-modal__video" />
-      </div>
-    </div>
-  );
-}
-
-function MicIcon() {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden="true">
-      <path
-        d="M12 15a3 3 0 0 0 3-3V7a3 3 0 1 0-6 0v5a3 3 0 0 0 3 3Z"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.8"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-      <path
-        d="M6.5 11.5a5.5 5.5 0 0 0 11 0M12 17v4M9 21h6"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.8"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
-  );
-}
-
-function MicOffIcon() {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden="true">
-      <path d="M4 4l16 16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
-      <path
-        d="M9.2 9.2V7a2.8 2.8 0 1 1 5.6 0v5a2.7 2.7 0 0 1-.3 1.3M6.6 11.5a5.5 5.5 0 0 0 8.6 4.5M12 17v4M9 21h6"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.8"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
-  );
-}
-
-function ScreenShareIcon() {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden="true">
-      <rect x="3.5" y="5" width="17" height="11.5" rx="2.2" fill="none" stroke="currentColor" strokeWidth="1.8" />
-      <path
-        d="M8.5 20h7M12 16.8V20M12 9l3 3m-3-3-3 3m3-3v6"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.8"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
-  );
-}
-
-function ScreenOffIcon() {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden="true">
-      <rect x="3.5" y="5" width="17" height="11.5" rx="2.2" fill="none" stroke="currentColor" strokeWidth="1.8" />
-      <path
-        d="M4 4l16 16M8.5 20h7M12 16.8V20"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.8"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
-  );
-}
-
-function HangupIcon() {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden="true">
-      <path d="M5.2 15.5c3.9-3.6 9.7-3.6 13.6 0" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
-      <path
-        d="M7.2 14.8 5 17.5M16.8 14.8l2.2 2.7"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="2"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
-  );
-}
-
-function HeadphoneIcon() {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden="true">
-      <path d="M4.5 13a7.5 7.5 0 1 1 15 0" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
-      <rect x="4" y="12" width="4.2" height="7" rx="2.1" fill="none" stroke="currentColor" strokeWidth="1.8" />
-      <rect x="15.8" y="12" width="4.2" height="7" rx="2.1" fill="none" stroke="currentColor" strokeWidth="1.8" />
-    </svg>
-  );
-}
-
-function CopyIcon() {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden="true">
-      <rect x="8" y="8" width="10" height="12" rx="2" fill="none" stroke="currentColor" strokeWidth="1.7" />
-      <path
-        d="M6 16H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v1"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.7"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
-  );
-}
-
-function MoreIcon() {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden="true">
-      <circle cx="12" cy="5" r="1.7" fill="currentColor" />
-      <circle cx="12" cy="12" r="1.7" fill="currentColor" />
-      <circle cx="12" cy="19" r="1.7" fill="currentColor" />
-    </svg>
-  );
-}
-
-function HomeIcon() {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden="true">
-      <rect x="4.2" y="4.5" width="15.6" height="15" rx="4" fill="none" stroke="currentColor" strokeWidth="1.8" />
-      <path d="M8.5 12h7" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
-    </svg>
-  );
-}
-
-function VoiceChannelIcon() {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden="true">
-      <circle cx="12" cy="12" r="8.3" fill="none" stroke="currentColor" strokeWidth="1.8" />
-      <circle cx="12" cy="12" r="3.1" fill="none" stroke="currentColor" strokeWidth="1.8" />
-    </svg>
-  );
-}
-
-function PlayIcon() {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden="true">
-      <path d="M8 6.5v11l8.6-5.5L8 6.5Z" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" />
-    </svg>
-  );
-}
-
-function HashIcon() {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden="true">
-      <path d="M9 4 7 20M17 4l-2 16M4 9h16M3 15h16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
-    </svg>
-  );
-}
-
-function PhoneIcon() {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden="true">
-      <path
-        d="M6.7 4.8a1.8 1.8 0 0 1 2.4-.2l2.2 1.8a1.8 1.8 0 0 1 .4 2.3l-.9 1.6a14 14 0 0 0 3.2 3.2l1.6-.9a1.8 1.8 0 0 1 2.3.4l1.8 2.2a1.8 1.8 0 0 1-.2 2.4l-1.1 1a3 3 0 0 1-3.2.6c-2.8-1.1-5.3-3-7.5-5.2s-4-4.7-5.2-7.5a3 3 0 0 1 .6-3.2l1-1.1Z"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.6"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
-  );
-}
-
-function ChatIcon() {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden="true">
-      <path
-        d="M5 6.5A2.5 2.5 0 0 1 7.5 4h9A2.5 2.5 0 0 1 19 6.5v6A2.5 2.5 0 0 1 16.5 15H10l-4.5 4v-4A2.5 2.5 0 0 1 3 12.5v-6Z"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.8"
-        strokeLinejoin="round"
-      />
-      <path d="M8 8.7h8M8 11.8h5.5" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
-    </svg>
-  );
-}
-
-function SearchIcon() {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden="true">
-      <circle cx="11" cy="11" r="5.6" fill="none" stroke="currentColor" strokeWidth="1.65" />
-      <path d="m15.2 15.2 3.8 3.8" fill="none" stroke="currentColor" strokeWidth="1.65" strokeLinecap="round" />
-    </svg>
-  );
-}
-
-function DownloadIcon() {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden="true">
-      <path
-        d="M12 4v10m0 0 3-3m-3 3-3-3M5 18.5h14"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.8"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
-  );
-}
-
-function MenuIcon() {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden="true">
-      <path d="M5 7.5h14M5 12h14M5 16.5h14" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
-    </svg>
-  );
-}
-
-function SendIcon() {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden="true">
-      <path d="m20 4-7.4 16-2.4-6.2L4 11.4 20 4Z" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinejoin="round" />
-    </svg>
-  );
-}
-
-function TagIcon() {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden="true">
-      <path d="M12 4h5l3 3v5l-9 9-7-7 8-10Z" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinejoin="round" />
-      <circle cx="14.5" cy="8.5" r="1.2" fill="currentColor" />
-    </svg>
-  );
-}
-
-function ListIcon() {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden="true">
-      <path
-        d="M8 7h11M8 12h11M8 17h11M4.5 7h.01M4.5 12h.01M4.5 17h.01"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.8"
-        strokeLinecap="round"
-      />
-    </svg>
-  );
-}
-
-function ReturnIcon() {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden="true">
-      <path
-        d="M20 6v8a3 3 0 0 1-3 3H7m0 0 3.5-3.5M7 17l3.5 3.5"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.8"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
-  );
-}
-
-function SmileIcon() {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden="true">
-      <circle cx="12" cy="12" r="8.3" fill="none" stroke="currentColor" strokeWidth="1.8" />
-      <path d="M9 10h.01M15 10h.01" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" />
-      <path d="M8.5 14c.9 1.3 2.1 2 3.5 2s2.6-.7 3.5-2" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
-    </svg>
-  );
-}
-
-function PlusIcon() {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden="true">
-      <path d="M12 5v14M5 12h14" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
-    </svg>
-  );
-}
-
-function ExpandIcon() {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden="true">
-      <path
-        d="M9 4H4v5M15 20h5v-5M20 9V4h-5M4 15v5h5"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.8"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-      <path d="M4 9 9 4M15 20l5-5M20 9l-5-5M4 15l5 5" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
-    </svg>
   );
 }
