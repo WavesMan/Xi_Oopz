@@ -416,14 +416,14 @@ export function LivePage() {
   });
 
   useEffect(() => {
-    if (!session) return;
+    if (!session?.token) return;
     void hydrateSession();
-  }, [hydrateSession, session]);
+  }, [hydrateSession, session?.token]);
 
   useEffect(() => {
-    if (!session || !user) return;
+    if (!session?.token || !user?.id) return;
     void bootstrapData();
-  }, [bootstrapData, session, user]);
+  }, [bootstrapData, session?.token, user?.id]);
 
   useEffect(() => {
     if (!session || !bootstrap || !chatChannel) return;

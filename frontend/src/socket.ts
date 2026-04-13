@@ -1,3 +1,5 @@
+import { buildWsUrl } from "./config/runtime";
+
 type SocketFrame = {
   type: string;
   payload: unknown;
@@ -26,8 +28,7 @@ export class SocketClient {
 
   connect() {
     this.manualClose = false;
-    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-    this.socket = new WebSocket(`${protocol}//${window.location.host}/ws?token=${encodeURIComponent(this.token)}&domainId=${this.domainId}`);
+    this.socket = new WebSocket(buildWsUrl(`/ws?token=${encodeURIComponent(this.token)}&domainId=${this.domainId}`));
 
     this.socket.addEventListener("open", () => {
       this.onStatus(true);
