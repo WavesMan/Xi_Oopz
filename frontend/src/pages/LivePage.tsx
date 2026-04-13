@@ -417,13 +417,23 @@ export function LivePage() {
 
   useEffect(() => {
     if (!session?.token) return;
-    void hydrateSession();
-  }, [hydrateSession, session?.token]);
+    let cancelled = false;
 
-  useEffect(() => {
-    if (!session?.token || !user?.id) return;
-    void bootstrapData();
-  }, [bootstrapData, session?.token, user?.id]);
+    /**
+     * 初始化会话与引导数据，避免并行触发重复请求。
+     */
+    const runInit = async () => {
+      await hydrateSession();
+      if (cancelled) return;
+      await bootstrapData();
+    };
+
+    void runInit();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [bootstrapData, hydrateSession, session?.token]);
 
   useEffect(() => {
     if (!session || !bootstrap || !chatChannel) return;

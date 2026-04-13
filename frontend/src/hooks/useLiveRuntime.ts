@@ -1,4 +1,4 @@
-import { useCallback, useEffect } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import type { Dispatch, MutableRefObject, SetStateAction } from "react";
 
 import { RTCController } from "../rtc";
@@ -26,8 +26,8 @@ type UseLiveRuntimeOptions = {
   currentUserRef: MutableRefObject<import("../types").User | null>;
   membersRef: MutableRefObject<import("../types").DomainMember[]>;
   iceServersRef: MutableRefObject<RTCIceServer[]>;
-  setWsConnected: (value: boolean) => void;
-  setStatus: (value: string) => void;
+  setWsConnected: Dispatch<SetStateAction<boolean>>;
+  setStatus: Dispatch<SetStateAction<string>>;
   setCurrentVoiceChannelId: (value: number | null) => void;
   setVoiceMembers: Dispatch<SetStateAction<Map<number, PresenceMember>>>;
   setOnlineCounts: Dispatch<SetStateAction<Record<string, number>>>;
@@ -83,11 +83,13 @@ export function useLiveRuntime(options: UseLiveRuntimeOptions) {
     voiceLog,
     screeningLog,
   } = options;
+  const socketEventHandlerRef = useRef<(type: string, payload: unknown) => void>(() => {});
+  const socketStatusHandlerRef = useRef<(connected: boolean) => void>(() => {});
 
   /**
-   * 分发并处理服务端实时事件。
+   * 分发并处理服务端实时事件（实现体）。
    */
-  const handleSocketEvent = useCallback(
+  const handleSocketEventImpl = useCallback(
     (type: string, payload: unknown) => {
       switch (type) {
         case "ready": {
@@ -256,13 +258,38 @@ export function useLiveRuntime(options: UseLiveRuntimeOptions) {
   );
 
   useEffect(() => {
+    socketEventHandlerRef.current = handleSocketEventImpl;
+  }, [handleSocketEventImpl]);
+
+  /**
+   * 稳定事件壳：避免事件处理实现变化触发 WS 生命周期重建。
+   */
+  const handleSocketEvent = useCallback((type: string, payload: unknown) => {
+    socketEventHandlerRef.current(type, payload);
+  }, []);
+
+  useEffect(() => {
+    socketStatusHandlerRef.current = (connected: boolean) => {
+      voiceLog("socket:status", { connected, domainId });
+      setWsConnected((prev) => (prev === connected ? prev : connected));
+      setStatus((prev) => {
+        const next = connected ? "WS 已连接" : "WS 重连中";
+        return prev === next ? prev : next;
+      });
+    };
+  }, [domainId, setStatus, setWsConnected, voiceLog]);
+
+  /**
+   * 稳定状态壳：仅传递状态变化，不让回调引用抖动影响连接生命周期。
+   */
+  const handleSocketStatus = useCallback((connected: boolean) => {
+    socketStatusHandlerRef.current(connected);
+  }, []);
+
+  useEffect(() => {
     if (!sessionToken || !userId || !domainId) return;
 
-    const socket = new SocketClient(sessionToken, domainId, handleSocketEvent, (connected) => {
-      voiceLog("socket:status", { connected, domainId });
-      setWsConnected(connected);
-      setStatus(connected ? "WS 已连接" : "WS 重连中");
-    });
+    const socket = new SocketClient(sessionToken, domainId, handleSocketEvent, handleSocketStatus);
 
     socketRef.current = socket;
     socket.connect();
@@ -284,9 +311,6 @@ export function useLiveRuntime(options: UseLiveRuntimeOptions) {
       },
     );
 
-    void rtcRef.current.setAudioInputDevice(selectedAudioInputId);
-    void rtcRef.current.setNoiseSuppression(noiseSuppressionEnabled);
-
     return () => {
       socket.close();
       socketRef.current = null;
@@ -294,26 +318,29 @@ export function useLiveRuntime(options: UseLiveRuntimeOptions) {
       setPeerDiagnostics(new Map());
     };
   }, [
-    currentUserRef,
-    currentVoiceChannelIdRef,
     domainId,
     handleSocketEvent,
-    iceServersRef,
-    membersRef,
-    noiseSuppressionEnabled,
-    pushNotice,
-    rtcRef,
-    selectedAudioInputId,
+    handleSocketStatus,
     sessionToken,
+    userId,
+    currentVoiceChannelIdRef,
+    currentUserRef,
+    membersRef,
+    voiceMembersRef,
+    iceServersRef,
+    setRemoteMedia,
+    setPeerDiagnostics,
     setLocalAudioStream,
     setLocalScreenStream,
-    setPeerDiagnostics,
-    setRemoteMedia,
     setStatus,
-    setWsConnected,
+    pushNotice,
+    rtcRef,
     socketRef,
-    userId,
-    voiceLog,
-    voiceMembersRef,
   ]);
+
+  useEffect(() => {
+    if (!rtcRef.current) return;
+    void rtcRef.current.setAudioInputDevice(selectedAudioInputId);
+    void rtcRef.current.setNoiseSuppression(noiseSuppressionEnabled);
+  }, [noiseSuppressionEnabled, rtcRef, selectedAudioInputId]);
 }

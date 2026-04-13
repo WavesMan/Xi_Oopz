@@ -1,3 +1,5 @@
+import { useCallback } from "react";
+
 /**
  * 语音调试日志标签集合。
  */
@@ -30,7 +32,7 @@ export function useLiveLogger() {
   /**
    * 语音日志：按白名单输出语音链路关键节点。
    */
-  function voiceLog(label: string, extra?: Record<string, unknown>) {
+  const voiceLog = useCallback((label: string, extra?: Record<string, unknown>) => {
     if (!VOICE_UI_DEBUG_LABELS.has(label)) return;
     const stamp = new Date().toISOString();
     if (extra) {
@@ -38,12 +40,12 @@ export function useLiveLogger() {
       return;
     }
     console.info(`[voice-ui][${stamp}] ${label}`);
-  }
+  }, []);
 
   /**
    * 放映日志：按白名单输出放映链路关键节点。
    */
-  function screeningLog(label: string, extra?: Record<string, unknown>) {
+  const screeningLog = useCallback((label: string, extra?: Record<string, unknown>) => {
     if (!SCREENING_DEBUG_LABELS.has(label)) return;
     const stamp = new Date().toISOString();
     if (extra) {
@@ -51,7 +53,7 @@ export function useLiveLogger() {
       return;
     }
     console.info(`[screening-ui][${stamp}] ${label}`);
-  }
+  }, []);
 
   return { voiceLog, screeningLog };
 }

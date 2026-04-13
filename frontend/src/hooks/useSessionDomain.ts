@@ -1,4 +1,4 @@
-import { useCallback, useState, type MutableRefObject } from "react";
+import { useCallback, useRef, useState, type MutableRefObject } from "react";
 
 import { liveFacade } from "../services/liveFacade";
 import { clearSession, saveSession } from "../services/session";
@@ -108,6 +108,10 @@ export function useSessionDomain(options: UseSessionDomainOptions) {
   const [channelTopicInput, setChannelTopicInput] = useState("");
   const [submittingDomain, setSubmittingDomain] = useState(false);
   const [submittingChannel, setSubmittingChannel] = useState(false);
+  const hydratingRef = useRef(false);
+  const bootstrapInFlightRef = useRef<Promise<void> | null>(null);
+  const bootstrapRequestKeyRef = useRef("");
+  const bootstrapRequestVersionRef = useRef(0);
 
   /**
    * 注销并回收本地会话状态。
@@ -176,6 +180,8 @@ export function useSessionDomain(options: UseSessionDomainOptions) {
    */
   const hydrateSession = useCallback(async () => {
     if (!session) return;
+    if (hydratingRef.current) return;
+    hydratingRef.current = true;
     try {
       const currentUser = await liveFacade.fetchMe(session.token);
       setUser(currentUser);
@@ -184,6 +190,8 @@ export function useSessionDomain(options: UseSessionDomainOptions) {
       logout();
       setStatus("登录状态已失效，请重新登录");
       showError(error, "登录状态失效", "登录状态已失效，请重新登录");
+    } finally {
+      hydratingRef.current = false;
     }
   }, [logout, session, setStatus, setUser, showError]);
 
@@ -193,26 +201,58 @@ export function useSessionDomain(options: UseSessionDomainOptions) {
   const bootstrapData = useCallback(
     async (channelId?: number, domainId?: number) => {
       if (!session) return;
-      try {
-        const data = await liveFacade.fetchBootstrap(session.token, channelId, domainId);
-        const channels = (data.categories || []).flatMap((category) => category.channels);
-        const firstTextChannel = channels.find((channel) => channel.type === "text") || null;
-        const firstVoiceChannel = channels.find((channel) => channel.type === "voice") || null;
-        const preferredActiveChannel = data.activeChannel || firstTextChannel || channels[0] || null;
-        setBootstrap(data);
-        setUser(data.user);
-        setActiveChannel(preferredActiveChannel);
-        setMessages(data.messages);
-        setVoiceTargetChannelId(firstVoiceChannel?.id || null);
-        setOnlineCounts(data.onlineCounts || {});
-        if (preferredActiveChannel?.type !== "screening") {
-          setScreeningSnapshot(null);
+      const requestKey = `${session.token}|${domainId ?? "default"}|${channelId ?? "default"}`;
+      if (bootstrapInFlightRef.current && bootstrapRequestKeyRef.current === requestKey) {
+        await bootstrapInFlightRef.current;
+        return;
+      }
+      bootstrapRequestVersionRef.current += 1;
+      const requestVersion = bootstrapRequestVersionRef.current;
+
+      const runner = (async () => {
+        try {
+          const data = await liveFacade.fetchBootstrap(session.token, channelId, domainId);
+          if (requestVersion !== bootstrapRequestVersionRef.current) {
+            return;
+          }
+          const channels = (data.categories || []).flatMap((category) => category.channels);
+          const firstTextChannel = channels.find((channel) => channel.type === "text") || null;
+          const firstVoiceChannel = channels.find((channel) => channel.type === "voice") || null;
+          const preferredActiveChannel = data.activeChannel || firstTextChannel || channels[0] || null;
+          setBootstrap(data);
+          setUser(data.user);
+          setActiveChannel(preferredActiveChannel);
+          setMessages(data.messages);
+          setVoiceTargetChannelId(firstVoiceChannel?.id || null);
+          setOnlineCounts(data.onlineCounts || {});
+          if (preferredActiveChannel?.type !== "screening") {
+            setScreeningSnapshot(null);
+          }
+          setStatus("页面已就绪");
+        } catch (error) {
+          if (requestVersion !== bootstrapRequestVersionRef.current) {
+            return;
+          }
+          console.error(error);
+          setStatus("初始化失败，请检查服务与数据库");
+          showError(error, "初始化失败", "请检查服务与数据库");
+        } finally {
+          if (bootstrapRequestKeyRef.current === requestKey) {
+            bootstrapInFlightRef.current = null;
+            bootstrapRequestKeyRef.current = "";
+          }
         }
-        setStatus("页面已就绪");
-      } catch (error) {
-        console.error(error);
-        setStatus("初始化失败，请检查服务与数据库");
-        showError(error, "初始化失败", "请检查服务与数据库");
+      })();
+
+      bootstrapRequestKeyRef.current = requestKey;
+      bootstrapInFlightRef.current = runner;
+      try {
+        await runner;
+      } finally {
+        if (bootstrapRequestKeyRef.current === requestKey && bootstrapInFlightRef.current === runner) {
+          bootstrapInFlightRef.current = null;
+          bootstrapRequestKeyRef.current = "";
+        }
       }
     },
     [
