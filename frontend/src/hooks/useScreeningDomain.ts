@@ -14,7 +14,10 @@ type UseScreeningDomainOptions = {
   firstTextChannel: Channel | null;
   screenSharing: boolean;
   screenSharePreset: { surface: ScreenShareOptions["surface"]; audioMode: ScreenShareOptions["audioMode"] };
-  rtcRef: MutableRefObject<{ stopScreenShare: (silent: boolean) => Promise<void>; startScreenShare: (options: ScreenShareOptions) => Promise<void> } | null>;
+  rtcRef: MutableRefObject<{
+    stopScreenShare: (silent: boolean) => Promise<void>;
+    startScreenShare: (options: ScreenShareOptions) => Promise<void>;
+  } | null>;
   socketRef: MutableRefObject<{ send: (type: string, payload: unknown) => void } | null>;
   screeningJoinDedupRef: MutableRefObject<{ channelId: number | null; until: number }>;
   setScreenSharing: (value: boolean) => void;

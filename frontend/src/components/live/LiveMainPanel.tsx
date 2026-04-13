@@ -22,7 +22,18 @@ import {
   VoiceChannelIcon,
 } from "./icons";
 import { escapeHTML, formatTime, initials } from "../../utils/live";
-import type { BootstrapResponse, Channel, DomainMember, Message, OnlineUserPresence, PeerConnectionDiagnostics, PresenceMember, RemoteMedia, ScreeningSnapshot, User } from "../../types";
+import type {
+  BootstrapResponse,
+  Channel,
+  DomainMember,
+  Message,
+  OnlineUserPresence,
+  PeerConnectionDiagnostics,
+  PresenceMember,
+  RemoteMedia,
+  ScreeningSnapshot,
+  User,
+} from "../../types";
 
 /**
  * 中部主区域与右侧成员栏组件。
@@ -319,7 +330,11 @@ export function LiveMainPanel(props: {
                 <button className="plain-icon-button" type="button">
                   <ReturnIcon />
                 </button>
-                <button className={`plain-icon-button ${showEmojiPicker ? "plain-icon-button--active" : ""}`} type="button" onClick={() => setShowEmojiPicker((value) => !value)}>
+                <button
+                  className={`plain-icon-button ${showEmojiPicker ? "plain-icon-button--active" : ""}`}
+                  type="button"
+                  onClick={() => setShowEmojiPicker((value) => !value)}
+                >
                   <SmileIcon />
                 </button>
                 <button className="plain-icon-button" type="button">

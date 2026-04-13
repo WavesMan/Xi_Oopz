@@ -112,7 +112,12 @@ export function LiveOverlays(props: {
             </div>
 
             {authMode === "register" ? (
-              <input maxLength={32} placeholder="昵称" value={displayNameInput} onChange={(event) => setDisplayNameInput(event.target.value)} />
+              <input
+                maxLength={32}
+                placeholder="昵称"
+                value={displayNameInput}
+                onChange={(event) => setDisplayNameInput(event.target.value)}
+              />
             ) : null}
             <input type="email" placeholder="邮箱" value={emailInput} onChange={(event) => setEmailInput(event.target.value)} />
             {authMode === "register" ? (
@@ -124,14 +129,27 @@ export function LiveOverlays(props: {
                   value={verificationCodeInput}
                   onChange={(event) => setVerificationCodeInput(event.target.value.replace(/\D+/g, "").slice(0, 6))}
                 />
-                <button className="action-pill" disabled={sendingVerificationCode || verificationCooldown > 0} onClick={() => void requestVerificationCode()}>
+                <button
+                  className="action-pill"
+                  disabled={sendingVerificationCode || verificationCooldown > 0}
+                  onClick={() => void requestVerificationCode()}
+                >
                   {sendingVerificationCode ? "发送中..." : verificationCooldown > 0 ? `${verificationCooldown}s` : "发送验证码"}
                 </button>
               </div>
             ) : null}
-            <input type="password" placeholder="密码（至少 6 位）" value={passwordInput} onChange={(event) => setPasswordInput(event.target.value)} />
+            <input
+              type="password"
+              placeholder="密码（至少 6 位）"
+              value={passwordInput}
+              onChange={(event) => setPasswordInput(event.target.value)}
+            />
 
-            <button className="action-pill action-pill--primary action-pill--full" disabled={submittingAuth} onClick={() => void submitAuth()}>
+            <button
+              className="action-pill action-pill--primary action-pill--full"
+              disabled={submittingAuth}
+              onClick={() => void submitAuth()}
+            >
               {submittingAuth ? "处理中..." : authMode === "register" ? "注册并进入" : "登录并进入"}
             </button>
           </div>
@@ -144,8 +162,18 @@ export function LiveOverlays(props: {
             <div className="eyebrow">NEW DOMAIN</div>
             <h2>创建一个新的域</h2>
             <p>创建后你会自动成为这个域的域主，并拥有创建频道的权限。</p>
-            <input maxLength={48} placeholder="域名称" value={domainNameInput} onChange={(event) => setDomainNameInput(event.target.value)} />
-            <input maxLength={120} placeholder="域描述" value={domainDescriptionInput} onChange={(event) => setDomainDescriptionInput(event.target.value)} />
+            <input
+              maxLength={48}
+              placeholder="域名称"
+              value={domainNameInput}
+              onChange={(event) => setDomainNameInput(event.target.value)}
+            />
+            <input
+              maxLength={120}
+              placeholder="域描述"
+              value={domainDescriptionInput}
+              onChange={(event) => setDomainDescriptionInput(event.target.value)}
+            />
             <div className="toggle-row">
               <button className="action-pill action-pill--primary" disabled={submittingDomain} onClick={() => void submitCreateDomain()}>
                 {submittingDomain ? "创建中..." : "创建域"}
@@ -164,8 +192,18 @@ export function LiveOverlays(props: {
             <div className="eyebrow">{channelComposerType === "text" ? "TEXT CHANNEL" : "VOICE CHANNEL"}</div>
             <h2>创建{channelComposerType === "text" ? "文字" : "语音"}频道</h2>
             <p>只有域主可以创建频道，创建后会自动出现在左侧频道列表。</p>
-            <input maxLength={48} placeholder="频道名称" value={channelNameInput} onChange={(event) => setChannelNameInput(event.target.value)} />
-            <input maxLength={120} placeholder="频道描述 / Topic" value={channelTopicInput} onChange={(event) => setChannelTopicInput(event.target.value)} />
+            <input
+              maxLength={48}
+              placeholder="频道名称"
+              value={channelNameInput}
+              onChange={(event) => setChannelNameInput(event.target.value)}
+            />
+            <input
+              maxLength={120}
+              placeholder="频道描述 / Topic"
+              value={channelTopicInput}
+              onChange={(event) => setChannelTopicInput(event.target.value)}
+            />
             <div className="toggle-row">
               <button className="action-pill action-pill--primary" disabled={submittingChannel} onClick={() => void submitCreateChannel()}>
                 {submittingChannel ? "创建中..." : "创建频道"}
@@ -180,7 +218,12 @@ export function LiveOverlays(props: {
 
       {maximizdScreen ? <ScreenPreviewModal screen={maximizdScreen} onClose={() => setMaximizedScreenKey(null)} /> : null}
       {showScreenShareSheet ? (
-        <ScreenShareSheet preset={screenSharePreset} onChange={setScreenSharePreset} onCancel={() => setShowScreenShareSheet(false)} onConfirm={() => void confirmScreenShare()} />
+        <ScreenShareSheet
+          preset={screenSharePreset}
+          onChange={setScreenSharePreset}
+          onCancel={() => setShowScreenShareSheet(false)}
+          onConfirm={() => void confirmScreenShare()}
+        />
       ) : null}
       <NoticeViewport notices={notices} onDismiss={dismissNotice} />
     </>

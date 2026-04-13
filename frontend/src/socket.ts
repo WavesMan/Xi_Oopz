@@ -1,3 +1,17 @@
+type SocketFrame = {
+  type: string;
+  payload: unknown;
+};
+
+/**
+ * 判断运行时数据是否符合 Socket 帧结构。
+ */
+function isSocketFrame(value: unknown): value is SocketFrame {
+  if (!value || typeof value !== "object") return false;
+  const record = value as Record<string, unknown>;
+  return typeof record.type === "string" && "payload" in record;
+}
+
 export class SocketClient {
   private socket: WebSocket | null = null;
   private heartbeat: number | null = null;
@@ -6,7 +20,7 @@ export class SocketClient {
   constructor(
     private readonly token: string,
     private readonly domainId: number,
-    private readonly onEvent: (type: string, payload: any) => void,
+    private readonly onEvent: (type: string, payload: unknown) => void,
     private readonly onStatus: (connected: boolean) => void,
   ) {}
 
@@ -32,8 +46,13 @@ export class SocketClient {
     });
 
     this.socket.addEventListener("message", (event) => {
-      const parsed = JSON.parse(event.data);
-      this.onEvent(parsed.type, parsed.payload);
+      try {
+        const parsed: unknown = JSON.parse(String(event.data));
+        if (!isSocketFrame(parsed)) return;
+        this.onEvent(parsed.type, parsed.payload);
+      } catch (error) {
+        console.warn("WS 消息解析失败", error);
+      }
     });
   }
 
@@ -45,7 +64,7 @@ export class SocketClient {
     this.socket?.close();
   }
 
-  send(type: string, payload: any) {
+  send(type: string, payload: unknown) {
     if (!this.socket || this.socket.readyState !== WebSocket.OPEN) return;
     this.socket.send(JSON.stringify({ type, payload }));
   }

@@ -148,8 +148,12 @@ export function ChannelSidebar(props: {
                 {showAudioSettings ? (
                   <div className="audio-settings-panel" onMouseEnter={openAudioSettings} onMouseLeave={scheduleCloseAudioSettings}>
                     <div className="audio-settings-panel__status">
-                      <span className={`audio-settings-panel__status-dot ${audioSetupPending ? "audio-settings-panel__status-dot--loading" : ""}`} />
-                      <strong>{audioDevicesLoading ? "正在加载音频设备..." : audioPrewarming ? "正在预热麦克风..." : "音频设备已就绪"}</strong>
+                      <span
+                        className={`audio-settings-panel__status-dot ${audioSetupPending ? "audio-settings-panel__status-dot--loading" : ""}`}
+                      />
+                      <strong>
+                        {audioDevicesLoading ? "正在加载音频设备..." : audioPrewarming ? "正在预热麦克风..." : "音频设备已就绪"}
+                      </strong>
                     </div>
                     <div className="audio-settings-panel__slider">
                       <input type="range" min="0" max="100" defaultValue="52" aria-label="麦克风灵敏度" />
@@ -225,7 +229,11 @@ export function ChannelSidebar(props: {
                         <strong>耳机静听</strong>
                         <span>开启后听不到任何人，并自动关闭麦克风</span>
                       </div>
-                      <button type="button" className={`switch-button ${deafened ? "switch-button--active" : ""}`} onClick={() => void toggleDeafen()}>
+                      <button
+                        type="button"
+                        className={`switch-button ${deafened ? "switch-button--active" : ""}`}
+                        onClick={() => void toggleDeafen()}
+                      >
                         <span />
                       </button>
                     </label>
@@ -330,7 +338,9 @@ export function ChannelSidebar(props: {
                       onClick={() => void selectChannel(channel)}
                       onDoubleClick={() => void enterVoiceChannel(channel)}
                     >
-                      <span>{channel.type === "voice" ? <VoiceChannelIcon /> : channel.type === "screening" ? <PlayIcon /> : <HashIcon />}</span>
+                      <span>
+                        {channel.type === "voice" ? <VoiceChannelIcon /> : channel.type === "screening" ? <PlayIcon /> : <HashIcon />}
+                      </span>
                       <span className="channel-item__name">{channel.name}</span>
                       {channel.type === "voice" ? (
                         <span className="channel-item__meta">

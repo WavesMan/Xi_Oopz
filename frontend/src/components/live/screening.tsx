@@ -285,7 +285,7 @@ export function ScreeningRoomPanel({
       player.removeEventListener("end", handleEnded);
       player.removeEventListener("error", handleError);
     };
-  }, [channel.id, isController, onPlaybackEvent, state]);
+  }, [channel.id, isController, isLiveScreening, onPlaybackEvent, state]);
 
   useEffect(() => {
     const becameController = isController && !previousControllerRef.current;

@@ -1,4 +1,4 @@
-import { useState, type MutableRefObject } from "react";
+import { useCallback, useState, type MutableRefObject } from "react";
 
 import { liveFacade } from "../services/liveFacade";
 import { clearSession, saveSession } from "../services/session";
@@ -112,7 +112,7 @@ export function useSessionDomain(options: UseSessionDomainOptions) {
   /**
    * 注销并回收本地会话状态。
    */
-  function logout() {
+  const logout = useCallback(() => {
     socketRef.current?.close();
     clearSession();
     setSession(null);
@@ -141,12 +141,40 @@ export function useSessionDomain(options: UseSessionDomainOptions) {
     setVoiceTargetChannelId(null);
     setScreeningSnapshot(null);
     setStatus("等待初始化");
-  }
+  }, [
+    setActiveChannel,
+    setBootstrap,
+    setCurrentVoiceChannelId,
+    setDeafened,
+    setLocalAudioStream,
+    setLocalScreenStream,
+    setMaximizedScreenKey,
+    setMessageDraft,
+    setMessages,
+    setMicEnabled,
+    setOnlineCounts,
+    setOnlineUsers,
+    setPeerDiagnostics,
+    setRemoteMedia,
+    setScreenSharing,
+    setScreeningChannelMembers,
+    setScreeningSnapshot,
+    setSession,
+    setShowAudioSettings,
+    setShowEmojiPicker,
+    setShowProfileMenu,
+    setStatus,
+    setUser,
+    setVoiceChannelMembers,
+    setVoiceMembers,
+    setVoiceTargetChannelId,
+    socketRef,
+  ]);
 
   /**
    * 刷新会话用户信息。
    */
-  async function hydrateSession() {
+  const hydrateSession = useCallback(async () => {
     if (!session) return;
     try {
       const currentUser = await liveFacade.fetchMe(session.token);
@@ -157,35 +185,49 @@ export function useSessionDomain(options: UseSessionDomainOptions) {
       setStatus("登录状态已失效，请重新登录");
       showError(error, "登录状态失效", "登录状态已失效，请重新登录");
     }
-  }
+  }, [logout, session, setStatus, setUser, showError]);
 
   /**
    * 拉取域引导数据并完成页面初始化状态。
    */
-  async function bootstrapData(channelId?: number, domainId?: number) {
-    if (!session) return;
-    try {
-      const data = await liveFacade.fetchBootstrap(session.token, channelId, domainId);
-      const channels = (data.categories || []).flatMap((category) => category.channels);
-      const firstTextChannel = channels.find((channel) => channel.type === "text") || null;
-      const firstVoiceChannel = channels.find((channel) => channel.type === "voice") || null;
-      const preferredActiveChannel = data.activeChannel || firstTextChannel || channels[0] || null;
-      setBootstrap(data);
-      setUser(data.user);
-      setActiveChannel(preferredActiveChannel);
-      setMessages(data.messages);
-      setVoiceTargetChannelId(firstVoiceChannel?.id || null);
-      setOnlineCounts(data.onlineCounts || {});
-      if (preferredActiveChannel?.type !== "screening") {
-        setScreeningSnapshot(null);
+  const bootstrapData = useCallback(
+    async (channelId?: number, domainId?: number) => {
+      if (!session) return;
+      try {
+        const data = await liveFacade.fetchBootstrap(session.token, channelId, domainId);
+        const channels = (data.categories || []).flatMap((category) => category.channels);
+        const firstTextChannel = channels.find((channel) => channel.type === "text") || null;
+        const firstVoiceChannel = channels.find((channel) => channel.type === "voice") || null;
+        const preferredActiveChannel = data.activeChannel || firstTextChannel || channels[0] || null;
+        setBootstrap(data);
+        setUser(data.user);
+        setActiveChannel(preferredActiveChannel);
+        setMessages(data.messages);
+        setVoiceTargetChannelId(firstVoiceChannel?.id || null);
+        setOnlineCounts(data.onlineCounts || {});
+        if (preferredActiveChannel?.type !== "screening") {
+          setScreeningSnapshot(null);
+        }
+        setStatus("页面已就绪");
+      } catch (error) {
+        console.error(error);
+        setStatus("初始化失败，请检查服务与数据库");
+        showError(error, "初始化失败", "请检查服务与数据库");
       }
-      setStatus("页面已就绪");
-    } catch (error) {
-      console.error(error);
-      setStatus("初始化失败，请检查服务与数据库");
-      showError(error, "初始化失败", "请检查服务与数据库");
-    }
-  }
+    },
+    [
+      session,
+      setActiveChannel,
+      setBootstrap,
+      setMessages,
+      setOnlineCounts,
+      setScreeningSnapshot,
+      setStatus,
+      setUser,
+      setVoiceTargetChannelId,
+      showError,
+    ],
+  );
 
   /**
    * 提交登录/注册动作。
@@ -273,28 +315,52 @@ export function useSessionDomain(options: UseSessionDomainOptions) {
   /**
    * 切换当前域并重置本地实时状态。
    */
-  async function switchDomain(domainId: number) {
-    if (!bootstrap || bootstrap.domain.id === domainId) return;
-    await rtcRef.current?.leaveVoice();
-    setCurrentVoiceChannelId(null);
-    setVoiceMembers(new Map());
-    setRemoteMedia(new Map());
-    setVoiceChannelMembers({});
-    setScreeningChannelMembers({});
-    setOnlineCounts({});
-    setMessages([]);
-    setScreenSharing(false);
-    setLocalAudioStream(null);
-    setLocalScreenStream(null);
-    setMaximizedScreenKey(null);
-    setMessageDraft("");
-    setShowEmojiPicker(false);
-    setShowAudioSettings(false);
-    setShowProfileMenu(false);
-    setVoiceTargetChannelId(null);
-    setStatus("正在切换域...");
-    await bootstrapData(undefined, domainId);
-  }
+  const switchDomain = useCallback(
+    async (domainId: number) => {
+      if (!bootstrap || bootstrap.domain.id === domainId) return;
+      await rtcRef.current?.leaveVoice();
+      setCurrentVoiceChannelId(null);
+      setVoiceMembers(new Map());
+      setRemoteMedia(new Map());
+      setVoiceChannelMembers({});
+      setScreeningChannelMembers({});
+      setOnlineCounts({});
+      setMessages([]);
+      setScreenSharing(false);
+      setLocalAudioStream(null);
+      setLocalScreenStream(null);
+      setMaximizedScreenKey(null);
+      setMessageDraft("");
+      setShowEmojiPicker(false);
+      setShowAudioSettings(false);
+      setShowProfileMenu(false);
+      setVoiceTargetChannelId(null);
+      setStatus("正在切换域...");
+      await bootstrapData(undefined, domainId);
+    },
+    [
+      bootstrap,
+      bootstrapData,
+      rtcRef,
+      setCurrentVoiceChannelId,
+      setLocalAudioStream,
+      setLocalScreenStream,
+      setMaximizedScreenKey,
+      setMessageDraft,
+      setMessages,
+      setOnlineCounts,
+      setRemoteMedia,
+      setScreenSharing,
+      setScreeningChannelMembers,
+      setShowAudioSettings,
+      setShowEmojiPicker,
+      setShowProfileMenu,
+      setStatus,
+      setVoiceChannelMembers,
+      setVoiceMembers,
+      setVoiceTargetChannelId,
+    ],
+  );
 
   /**
    * 提交创建域动作。
